@@ -25,7 +25,19 @@ pub struct BookDocument {
     pub title: String,
     pub path: PathBuf,
     pub format: BookFormat,
+    pub metadata: BookMetadata,
     pub sections: Vec<Section>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct BookMetadata {
+    pub title: String,
+    pub author: Option<String>,
+    pub language: Option<String>,
+    pub publisher: Option<String>,
+    pub format: BookFormat,
+    pub path: PathBuf,
+    pub section_count: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -72,6 +84,15 @@ impl BookDocument {
     }
 }
 
+impl BookFormat {
+    pub fn label(self) -> &'static str {
+        match self {
+            BookFormat::Epub => "EPUB",
+            BookFormat::Txt => "TXT",
+        }
+    }
+}
+
 pub fn load_book(path: impl AsRef<Path>) -> Result<BookDocument> {
     let path = path.as_ref();
     let extension = path
@@ -88,18 +109,29 @@ pub fn load_book(path: impl AsRef<Path>) -> Result<BookDocument> {
 }
 
 pub fn load_txt(path: &Path) -> Result<BookDocument> {
-    let bytes = std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to read {}", path.display()))?;
     let text = decode_text(&bytes);
     let title = fallback_title(path);
     let stable_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let id = stable_book_id(&stable_path, &title);
     let sections = split_txt_sections(&text);
+    let metadata = BookMetadata {
+        title: title.clone(),
+        author: None,
+        language: None,
+        publisher: None,
+        format: BookFormat::Txt,
+        path: stable_path.clone(),
+        section_count: sections.len(),
+    };
 
     Ok(BookDocument {
         id,
-        title,
+        title: title.clone(),
         path: stable_path,
         format: BookFormat::Txt,
+        metadata,
         sections,
     })
 }
@@ -110,13 +142,10 @@ pub fn load_epub(path: &Path) -> Result<BookDocument> {
     let rootfile = epub_rootfile(&mut archive)?;
     let opf = read_zip_string(&mut archive, &rootfile)?;
     let opf_doc = Document::parse(&opf).context("Invalid EPUB package document")?;
-    let title = opf_doc
-        .descendants()
-        .find(|node| node.tag_name().name() == "title")
-        .and_then(|node| node.text())
-        .map(clean_inline_text)
-        .filter(|value| !value.is_empty())
-        .unwrap_or_else(|| fallback_title(path));
+    let title = metadata_text(&opf_doc, "title").unwrap_or_else(|| fallback_title(path));
+    let author = metadata_text(&opf_doc, "creator");
+    let language = metadata_text(&opf_doc, "language");
+    let publisher = metadata_text(&opf_doc, "publisher");
 
     let base = Path::new(&rootfile)
         .parent()
@@ -148,10 +177,9 @@ pub fn load_epub(path: &Path) -> Result<BookDocument> {
             .with_context(|| format!("Failed to read EPUB chapter {chapter_path}"))?;
         let text = html_to_text(&html);
         if !text.trim().is_empty() {
-            sections.push(Section {
-                title: format!("Chapter {}", sections.len() + 1),
-                text,
-            });
+            let title = chapter_title_from_html(&html)
+                .unwrap_or_else(|| format!("Chapter {}", sections.len() + 1));
+            sections.push(Section { title, text });
         }
     }
 
@@ -161,13 +189,32 @@ pub fn load_epub(path: &Path) -> Result<BookDocument> {
 
     let stable_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let id = stable_book_id(&stable_path, &title);
+    let section_count = sections.len();
     Ok(BookDocument {
         id,
-        title,
-        path: stable_path,
+        title: title.clone(),
+        path: stable_path.clone(),
         format: BookFormat::Epub,
+        metadata: BookMetadata {
+            title,
+            author,
+            language,
+            publisher,
+            format: BookFormat::Epub,
+            path: stable_path,
+            section_count,
+        },
         sections,
     })
+}
+
+fn metadata_text(document: &Document<'_>, tag: &str) -> Option<String> {
+    document
+        .descendants()
+        .find(|node| node.tag_name().name() == tag)
+        .and_then(|node| node.text())
+        .map(clean_inline_text)
+        .filter(|value| !value.is_empty())
 }
 
 fn epub_rootfile<R: Read + Seek>(archive: &mut ZipArchive<R>) -> Result<String> {
@@ -249,6 +296,16 @@ fn normalize_zip_path(path: PathBuf) -> String {
         })
         .collect::<Vec<_>>()
         .join("/")
+}
+
+fn chapter_title_from_html(html: &str) -> Option<String> {
+    let document = Document::parse(html).ok()?;
+    document
+        .descendants()
+        .find(|node| matches!(node.tag_name().name(), "h1" | "h2" | "h3" | "title"))
+        .and_then(|node| node.text())
+        .map(clean_inline_text)
+        .filter(|value| !value.is_empty())
 }
 
 fn html_to_text(html: &str) -> String {
@@ -344,6 +401,15 @@ mod tests {
             title: "Title".into(),
             path: PathBuf::new(),
             format: BookFormat::Txt,
+            metadata: BookMetadata {
+                title: "Title".into(),
+                author: None,
+                language: None,
+                publisher: None,
+                format: BookFormat::Txt,
+                path: PathBuf::new(),
+                section_count: 1,
+            },
             sections: vec![Section {
                 title: "A".into(),
                 text: "Hello Rust reader".into(),
@@ -369,6 +435,8 @@ mod tests {
 
         assert_eq!(document.title, "my-book");
         assert_eq!(document.format, BookFormat::Txt);
+        assert_eq!(document.metadata.title, "my-book");
+        assert_eq!(document.metadata.section_count, 2);
         assert_eq!(document.sections.len(), 2);
         assert_eq!(document.sections[0].text, "First part");
         assert!(document.path.is_absolute());
@@ -387,6 +455,15 @@ mod tests {
             title: "Title".into(),
             path: PathBuf::new(),
             format: BookFormat::Txt,
+            metadata: BookMetadata {
+                title: "Title".into(),
+                author: None,
+                language: None,
+                publisher: None,
+                format: BookFormat::Txt,
+                path: PathBuf::new(),
+                section_count: 1,
+            },
             sections: vec![Section {
                 title: "A".into(),
                 text: "Hello Rust reader".into(),
@@ -394,5 +471,51 @@ mod tests {
         };
 
         assert!(document.search("   ").is_empty());
+    }
+
+    #[test]
+    fn extracts_epub_metadata_fields() {
+        let opf = r#"
+            <package xmlns:dc="http://purl.org/dc/elements/1.1/">
+              <metadata>
+                <dc:title>Example Book</dc:title>
+                <dc:creator>Jane Writer</dc:creator>
+                <dc:language>en</dc:language>
+                <dc:publisher>Small Press</dc:publisher>
+              </metadata>
+            </package>
+        "#;
+        let document = Document::parse(opf).unwrap();
+
+        assert_eq!(
+            metadata_text(&document, "title").as_deref(),
+            Some("Example Book")
+        );
+        assert_eq!(
+            metadata_text(&document, "creator").as_deref(),
+            Some("Jane Writer")
+        );
+        assert_eq!(metadata_text(&document, "language").as_deref(), Some("en"));
+        assert_eq!(
+            metadata_text(&document, "publisher").as_deref(),
+            Some("Small Press")
+        );
+    }
+
+    #[test]
+    fn extracts_chapter_title_from_html_heading() {
+        let html = r#"<html><body><h2> The Real Start </h2><p>Body</p></body></html>"#;
+
+        assert_eq!(
+            chapter_title_from_html(html).as_deref(),
+            Some("The Real Start")
+        );
+    }
+
+    #[test]
+    fn ignores_blank_chapter_title() {
+        let html = r#"<html><head><title>   </title></head><body><p>Body</p></body></html>"#;
+
+        assert_eq!(chapter_title_from_html(html), None);
     }
 }

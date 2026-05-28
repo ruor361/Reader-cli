@@ -7,7 +7,20 @@ pub struct Page {
 }
 
 pub fn paginate(sections: &[crate::book::Section], width: u16, height: u16) -> Vec<Page> {
+    paginate_with_text_width(sections, width, height, None)
+}
+
+pub fn paginate_with_text_width(
+    sections: &[crate::book::Section],
+    width: u16,
+    height: u16,
+    text_width: Option<u16>,
+) -> Vec<Page> {
     let content_width = usize::from(width.max(20)).saturating_sub(2).max(20);
+    let content_width = text_width
+        .map(|value| usize::from(value.max(20)))
+        .unwrap_or(content_width)
+        .min(content_width);
     let content_height = usize::from(height.max(8)).saturating_sub(4).max(4);
     let mut pages = Vec::new();
 
@@ -35,6 +48,13 @@ pub fn paginate(sections: &[crate::book::Section], width: u16, height: u16) -> V
     pages
 }
 
+pub fn first_page_for_section(pages: &[Page], section_index: usize) -> Option<usize> {
+    pages
+        .iter()
+        .find(|page| page.section_index == section_index)
+        .map(|page| page.index)
+}
+
 pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
     let mut lines = Vec::new();
     for raw_line in text.lines() {
@@ -45,7 +65,8 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
 
         let mut current = String::new();
         for word in raw_line.split_whitespace() {
-            let pending_len = current.chars().count() + usize::from(!current.is_empty()) + word.chars().count();
+            let pending_len =
+                current.chars().count() + usize::from(!current.is_empty()) + word.chars().count();
             if pending_len > width && !current.is_empty() {
                 lines.push(std::mem::take(&mut current));
             }
@@ -118,5 +139,41 @@ mod tests {
         let lines = wrap_text("abcdefghij", 4);
 
         assert_eq!(lines, vec!["abcd", "efgh", "ij"]);
+    }
+
+    #[test]
+    fn finds_first_page_for_section() {
+        let pages = paginate(
+            &[
+                Section {
+                    title: "A".into(),
+                    text: "one two three four five six seven eight".into(),
+                },
+                Section {
+                    title: "B".into(),
+                    text: "nine ten".into(),
+                },
+            ],
+            12,
+            8,
+        );
+
+        assert_eq!(first_page_for_section(&pages, 1), Some(1));
+        assert_eq!(first_page_for_section(&pages, 99), None);
+    }
+
+    #[test]
+    fn optional_text_width_caps_wrapping_width() {
+        let pages = paginate_with_text_width(
+            &[Section {
+                title: "A".into(),
+                text: "alpha beta gamma delta".into(),
+            }],
+            80,
+            24,
+            Some(20),
+        );
+
+        assert_eq!(pages[0].lines, vec!["alpha beta gamma", "delta"]);
     }
 }

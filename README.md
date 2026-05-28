@@ -9,6 +9,9 @@
 - Resume the most recently read book
 - Full-screen terminal reading UI with progress saving
 - EPUB/TXT parsing
+- Table of contents navigation
+- Metadata view
+- Display configuration
 - Bookmarks
 - Book search
 
@@ -33,12 +36,56 @@ reader search <book-id-or-title> <query>
 
 ## Reader Keys
 
-- `q` / `Esc`: quit and save progress
-- `j` / `Down` / `PageDown` / `Space`: next page
-- `k` / `Up` / `PageUp`: previous page
-- `g`: first page
-- `G`: last page
-- `b`: add a bookmark at the current page
-- `/`: search prompt
-- `n`: next search result
-- `N`: previous search result
+Reader has one root reading mode and a few child panels. `Esc` returns from a
+child panel to reading mode. At the reading root, `Esc` quits and saves progress.
+`Ctrl+C` quits and saves from any mode.
+
+| Mode | Key | Action |
+| --- | --- | --- |
+| Reading | `q` / `Esc` | Quit and save progress |
+| Reading | `j` / `Down` / `PageDown` / `Space` | Next page |
+| Reading | `k` / `Up` / `PageUp` | Previous page |
+| Reading | `g` / `G` | First / last page |
+| Reading | `t` | Open table of contents |
+| Reading | `M` | Open book metadata |
+| Reading | `/` | Open search prompt |
+| Reading | `c` | Switch color theme |
+| Reading | `s` | Show or hide progress |
+| Reading | `b` | Add a bookmark at the current page |
+| Reading | `n` / `N` | Next / previous search result |
+| Table of contents | `j/k` or arrows | Move selection |
+| Table of contents | `g` / `G` | First / last entry |
+| Table of contents | `Enter` | Jump to selected section and return |
+| Table of contents | `Esc` / `q` / `t` | Return without jumping |
+| Metadata | `Esc` / `Enter` / `q` / `M` | Close and return |
+| Search | text | Type query |
+| Search | `Backspace` | Delete character |
+| Search | `Enter` | Run search and return |
+| Search | `Esc` | Cancel and return |
+
+## Configuration
+
+Reader stores display settings in:
+
+- Linux and macOS: `~/.config/reader/configuration.json`
+- Windows: `%APPDATA%\reader\configuration.json`
+
+Supported settings:
+
+```json
+{
+  "theme": "dark",
+  "show_progress": true,
+  "mouse_support": false,
+  "text_width": null
+}
+```
+
+`theme` can be `dark` or `light`. `text_width` may be set to a terminal
+column width, or left as `null` to use the available terminal width.
+
+## Not Yet Supported
+
+Reader intentionally keeps this stage focused on core EPUB/TXT reading. FB2,
+MOBI, AZW3, URL reading, dictionary lookup, text-to-speech, double spread, and
+seamless between-chapter reading are not implemented yet.

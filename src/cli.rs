@@ -48,21 +48,10 @@ pub enum Command {
 
 #[derive(Debug, Subcommand)]
 pub enum BookmarkCommand {
-    Add {
-        book: String,
-        label: String,
-    },
-    List {
-        book: String,
-    },
-    Goto {
-        book: String,
-        bookmark: String,
-    },
-    Delete {
-        book: String,
-        bookmark: String,
-    },
+    Add { book: String, label: String },
+    List { book: String },
+    Goto { book: String, bookmark: String },
+    Delete { book: String, bookmark: String },
 }
 
 #[cfg(test)]

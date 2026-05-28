@@ -90,13 +90,22 @@ impl Store {
         Ok(())
     }
 
-    pub fn add_book(&mut self, document: &BookDocument, path: impl AsRef<Path>) -> Result<&LibraryBook> {
+    pub fn add_book(
+        &mut self,
+        document: &BookDocument,
+        path: impl AsRef<Path>,
+    ) -> Result<&LibraryBook> {
         let canonical = path
             .as_ref()
             .canonicalize()
             .unwrap_or_else(|_| path.as_ref().to_path_buf());
 
-        if let Some(index) = self.library.books.iter().position(|book| book.id == document.id) {
+        if let Some(index) = self
+            .library
+            .books
+            .iter()
+            .position(|book| book.id == document.id)
+        {
             self.library.books[index].title = document.title.clone();
             self.library.books[index].path = canonical;
             self.library.books[index].format = document.format;
@@ -164,13 +173,23 @@ impl Store {
     }
 
     pub fn set_progress(&mut self, book_id: &str, progress: Progress) {
-        if let Some(book) = self.library.books.iter_mut().find(|book| book.id == book_id) {
+        if let Some(book) = self
+            .library
+            .books
+            .iter_mut()
+            .find(|book| book.id == book_id)
+        {
             book.progress = progress;
             self.library.last_book_id = Some(book_id.to_string());
         }
     }
 
-    pub fn add_bookmark(&mut self, book_id: &str, label: String, progress: Progress) -> Result<Bookmark> {
+    pub fn add_bookmark(
+        &mut self,
+        book_id: &str,
+        label: String,
+        progress: Progress,
+    ) -> Result<Bookmark> {
         let book = self
             .library
             .books
@@ -222,14 +241,23 @@ impl Store {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::book::{BookDocument, Section};
+    use crate::book::{BookDocument, BookMetadata, Section};
 
     fn document(id: &str, title: &str, path: PathBuf) -> BookDocument {
         BookDocument {
             id: id.into(),
             title: title.into(),
-            path,
+            path: path.clone(),
             format: BookFormat::Txt,
+            metadata: BookMetadata {
+                title: title.into(),
+                author: None,
+                language: None,
+                publisher: None,
+                format: BookFormat::Txt,
+                path,
+                section_count: 1,
+            },
             sections: vec![Section {
                 title: "A".into(),
                 text: "Hello".into(),
@@ -319,7 +347,10 @@ mod tests {
             .unwrap();
 
         assert_eq!(bookmark.id, "bm-1");
-        assert_eq!(store.bookmark_for("book", "bm-1").unwrap().progress(), progress);
+        assert_eq!(
+            store.bookmark_for("book", "bm-1").unwrap().progress(),
+            progress
+        );
 
         let removed = store.delete_bookmark("book", "bm-1").unwrap();
         assert_eq!(removed.label, "Important");

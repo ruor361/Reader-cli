@@ -4,12 +4,14 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use reader::book::load_book;
 use reader::cli::{BookmarkCommand, Cli, Command};
+use reader::config::ReaderConfig;
 use reader::storage::Store;
 use reader::tui::run_reader;
 
 fn main() -> Result<()> {
     let cli = Cli::parse();
     let mut store = Store::open_default()?;
+    let mut config = ReaderConfig::open_default()?;
 
     match cli.command {
         Some(Command::Add { file }) => {
@@ -34,7 +36,7 @@ fn main() -> Result<()> {
         Some(Command::Open { book }) => {
             let entry = store.resolve_book(&book)?.clone();
             let document = load_book(&entry.path)?;
-            run_reader(document, entry.id, &mut store)?;
+            run_reader(document, entry.id, &mut store, &mut config)?;
         }
         Some(Command::Resume) => {
             let entry = store
@@ -42,7 +44,7 @@ fn main() -> Result<()> {
                 .with_context(|| "No recent book. Open or add a book first.")?
                 .clone();
             let document = load_book(&entry.path)?;
-            run_reader(document, entry.id, &mut store)?;
+            run_reader(document, entry.id, &mut store, &mut config)?;
         }
         Some(Command::Remove { book }) => {
             let removed = store.remove_book(&book)?;
@@ -55,7 +57,11 @@ fn main() -> Result<()> {
                 let progress = store.progress_for(&entry.id).cloned().unwrap_or_default();
                 let bookmark = store.add_bookmark(&entry.id, label, progress)?;
                 store.save()?;
-                println!("Bookmark added: {} at page {}", bookmark.id, bookmark.page + 1);
+                println!(
+                    "Bookmark added: {} at page {}",
+                    bookmark.id,
+                    bookmark.page + 1
+                );
             }
             BookmarkCommand::List { book } => {
                 let entry = store.resolve_book(&book)?;
@@ -77,7 +83,7 @@ fn main() -> Result<()> {
                 store.set_progress(&entry.id, target.progress());
                 store.save()?;
                 let document = load_book(&entry.path)?;
-                run_reader(document, entry.id, &mut store)?;
+                run_reader(document, entry.id, &mut store, &mut config)?;
             }
             BookmarkCommand::Delete { book, bookmark } => {
                 let entry = store.resolve_book(&book)?.clone();
@@ -111,7 +117,7 @@ fn main() -> Result<()> {
             let book = store.add_book(&document, file)?;
             let id = book.id.clone();
             store.save()?;
-            run_reader(document, id, &mut store)?;
+            run_reader(document, id, &mut store, &mut config)?;
         }
     }
 
@@ -126,7 +132,10 @@ fn resolve_input_path(path: PathBuf) -> Result<PathBuf> {
     let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
         return Ok(path);
     };
-    let Some(parent) = path.parent().filter(|parent| !parent.as_os_str().is_empty()) else {
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
         return Ok(path);
     };
 
