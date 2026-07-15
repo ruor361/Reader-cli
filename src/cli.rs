@@ -35,6 +35,8 @@ pub enum Command {
     Resume,
     Remove {
         book: String,
+        #[arg(long)]
+        delete_file: bool,
     },
     Bookmark {
         #[command(subcommand)]
@@ -44,6 +46,10 @@ pub enum Command {
         book: String,
         query: String,
     },
+    Shelf {
+        #[command(subcommand)]
+        command: Option<ShelfCommand>,
+    },
 }
 
 #[derive(Debug, Subcommand)]
@@ -52,6 +58,16 @@ pub enum BookmarkCommand {
     List { book: String },
     Goto { book: String, bookmark: String },
     Delete { book: String, bookmark: String },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum ShelfCommand {
+    /// Reconcile the bookshelf directory, per-book sidecar JSONs, and
+    /// `library.json`. Passing DIR also saves it as the managed bookshelf.
+    Refresh {
+        #[arg(value_name = "DIR")]
+        dir: Option<PathBuf>,
+    },
 }
 
 #[cfg(test)]
@@ -112,5 +128,38 @@ mod tests {
 
         assert_eq!(book, "abc123");
         assert_eq!(query, "needle");
+    }
+
+    #[test]
+    fn parses_shelf_command() {
+        let cli = Cli::parse_from(["reader", "shelf"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Shelf { command: None })
+        ));
+    }
+
+    #[test]
+    fn parses_shelf_refresh_command() {
+        let cli = Cli::parse_from(["reader", "shelf", "refresh"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Shelf {
+                command: Some(ShelfCommand::Refresh { dir: None })
+            })
+        ));
+    }
+
+    #[test]
+    fn parses_shelf_refresh_directory() {
+        let cli = Cli::parse_from(["reader", "shelf", "refresh", "Liberal"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Shelf {
+                command: Some(ShelfCommand::Refresh {
+                    dir: Some(ref dir)
+                })
+            }) if dir == &PathBuf::from("Liberal")
+        ));
     }
 }

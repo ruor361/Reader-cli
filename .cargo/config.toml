@@ -1,0 +1,10 @@
+[build]
+target = "x86_64-pc-windows-gnu"
+
+[target.x86_64-pc-windows-gnu]
+linker = "gcc"
+rustflags = ["-C", "link-arg=-static-libgcc"]
+
+[env]
+CC_x86_64_pc_windows_gnu = { value = "gcc", force = true }
+AR_x86_64_pc_windows_gnu = { value = "ar", force = true }

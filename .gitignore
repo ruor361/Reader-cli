@@ -1,5 +1,22 @@
+# Rust build output
 /target/
 /target-*/
+**/*.rs.bk
+
+# IDE and editor-local files
 /.idea/
 /.vscode/
+*.swp
+*.swo
+*~
+
+# OS metadata
+.DS_Store
+Thumbs.db
+Desktop.ini
+
+# Local agent permissions and overrides
+/.claude/settings.local.json
+
+# Local sample library and generated sidecars
 /Liberal/

@@ -1,5 +1,6 @@
 use reader::book::load_book;
 use reader::storage::{Progress, Store};
+use reader::TextPosition;
 
 #[test]
 fn txt_book_library_progress_and_bookmarks_survive_reload() {
@@ -11,11 +12,7 @@ fn txt_book_library_progress_and_bookmarks_survive_reload() {
     let document = load_book(&book_path).unwrap();
     let mut store = Store::open(store_path.clone()).unwrap();
     let book_id = store.add_book(&document, &book_path).unwrap().id.clone();
-    let progress = Progress {
-        page: 1,
-        section_index: 1,
-        start_line: 0,
-    };
+    let progress = Progress::new(TextPosition::new(1, 0));
     store.set_progress(&book_id, progress);
     store
         .add_bookmark(&book_id, "Needle section".to_string(), progress)
@@ -41,6 +38,6 @@ fn loaded_txt_books_are_searchable() {
     let results = document.search("needle");
 
     assert_eq!(results.len(), 1);
-    assert_eq!(results[0].section_index, 1);
+    assert_eq!(results[0].position.section_index, 1);
     assert!(results[0].preview.contains("needle"));
 }

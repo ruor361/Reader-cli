@@ -1,11 +1,22 @@
 pub mod book;
+pub mod bookshelf;
 pub mod cli;
 pub mod config;
 pub mod pagination;
+pub mod paths;
+pub mod privacy;
+mod reader_input;
+mod reader_state;
+mod reader_view;
+pub mod shelf;
 pub mod storage;
 pub mod tui;
+pub mod ui;
 
-pub use book::{BookDocument, BookFormat, Section};
-pub use config::{ReaderConfig, Theme};
+pub use book::{BookDocument, BookFormat, ContentMetrics, Section, TextPosition};
+pub use config::ReaderConfig;
 pub use pagination::{paginate, Page};
-pub use storage::{Bookmark, Library, LibraryBook, Progress, Store};
+pub use paths::{configuration_path, library_path};
+pub use privacy::privacy_stack;
+pub use storage::{Bookmark, Library, LibraryBook, Progress, ScanDirResult, Store};
+pub use ui::Theme;

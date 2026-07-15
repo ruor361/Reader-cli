@@ -19,6 +19,105 @@ pub struct Section {
     pub text: String,
 }
 
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct TextPosition {
+    pub section_index: usize,
+    pub char_offset: usize,
+}
+
+impl TextPosition {
+    pub const fn new(section_index: usize, char_offset: usize) -> Self {
+        Self {
+            section_index,
+            char_offset,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub struct ContentMetrics {
+    pub section_char_counts: Vec<usize>,
+}
+
+impl ContentMetrics {
+    pub fn from_sections(sections: &[Section]) -> Self {
+        Self {
+            section_char_counts: sections
+                .iter()
+                .map(|section| section.text.chars().count())
+                .collect(),
+        }
+    }
+
+    pub fn total_chars(&self) -> usize {
+        self.section_char_counts.iter().sum()
+    }
+
+    pub fn clamp(&self, position: TextPosition) -> TextPosition {
+        if self.section_char_counts.is_empty() {
+            return TextPosition::default();
+        }
+        let section_index = position
+            .section_index
+            .min(self.section_char_counts.len().saturating_sub(1));
+        TextPosition::new(
+            section_index,
+            position
+                .char_offset
+                .min(self.section_char_counts[section_index]),
+        )
+    }
+
+    pub fn global_char_offset(&self, position: TextPosition) -> usize {
+        let position = self.clamp(position);
+        self.section_char_counts[..position.section_index]
+            .iter()
+            .sum::<usize>()
+            .saturating_add(position.char_offset)
+    }
+
+    pub fn progress_tenths(&self, position: TextPosition) -> u16 {
+        let total = self.total_chars();
+        if total == 0 {
+            return 0;
+        }
+        let offset = self.global_char_offset(position).min(total);
+        (((offset as u128 * 1000) + (total as u128 / 2)) / total as u128) as u16
+    }
+
+    pub fn position_at_tenths(&self, tenths: u16) -> TextPosition {
+        if self.section_char_counts.is_empty() {
+            return TextPosition::default();
+        }
+        let tenths = tenths.min(1000);
+        if tenths == 0 {
+            return TextPosition::default();
+        }
+        let total = self.total_chars();
+        if total == 0 {
+            return TextPosition::new(self.section_char_counts.len().saturating_sub(1), 0);
+        }
+
+        let target = ((total as u128 * tenths as u128) + 500) / 1000;
+        let target = usize::try_from(target).unwrap_or(total).min(total);
+        if target == total {
+            let section_index = self.section_char_counts.len() - 1;
+            return TextPosition::new(section_index, self.section_char_counts[section_index]);
+        }
+
+        let mut remaining = target;
+        for (section_index, &length) in self.section_char_counts.iter().enumerate() {
+            if remaining < length || (remaining == 0 && length > 0) {
+                return TextPosition::new(section_index, remaining);
+            }
+            remaining = remaining.saturating_sub(length);
+        }
+
+        let section_index = self.section_char_counts.len() - 1;
+        TextPosition::new(section_index, self.section_char_counts[section_index])
+    }
+}
+
 #[derive(Debug, Clone)]
 pub struct BookDocument {
     pub id: String,
@@ -42,12 +141,15 @@ pub struct BookMetadata {
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
-    pub section_index: usize,
-    pub byte_offset: usize,
+    pub position: TextPosition,
     pub preview: String,
 }
 
 impl BookDocument {
+    pub fn content_metrics(&self) -> ContentMetrics {
+        ContentMetrics::from_sections(&self.sections)
+    }
+
     pub fn full_text(&self) -> String {
         self.sections
             .iter()
@@ -66,15 +168,25 @@ impl BookDocument {
             .iter()
             .enumerate()
             .flat_map(|(section_index, section)| {
-                let haystack = section.text.to_lowercase();
+                let (haystack, source_chars) = lowercase_with_source_map(&section.text);
                 let mut offset = 0;
                 let mut results = Vec::new();
                 while let Some(found) = haystack[offset..].find(&query) {
                     let byte_offset = offset + found;
+                    let lowercase_char_offset = haystack[..byte_offset].chars().count();
+                    let char_offset = source_chars
+                        .get(lowercase_char_offset)
+                        .copied()
+                        .unwrap_or_else(|| section.text.chars().count());
+                    let source_byte_offset = section
+                        .text
+                        .char_indices()
+                        .nth(char_offset)
+                        .map(|(byte_offset, _)| byte_offset)
+                        .unwrap_or(section.text.len());
                     results.push(SearchResult {
-                        section_index,
-                        byte_offset,
-                        preview: preview(&section.text, byte_offset),
+                        position: TextPosition::new(section_index, char_offset),
+                        preview: preview(&section.text, source_byte_offset),
                     });
                     offset = byte_offset + query.len();
                 }
@@ -82,6 +194,18 @@ impl BookDocument {
             })
             .collect()
     }
+}
+
+fn lowercase_with_source_map(text: &str) -> (String, Vec<usize>) {
+    let mut lowercase = String::new();
+    let mut source_chars = Vec::new();
+    for (source_char, ch) in text.chars().enumerate() {
+        for lowercase_char in ch.to_lowercase() {
+            lowercase.push(lowercase_char);
+            source_chars.push(source_char);
+        }
+    }
+    (lowercase, source_chars)
 }
 
 impl BookFormat {
@@ -104,7 +228,7 @@ pub fn load_book(path: impl AsRef<Path>) -> Result<BookDocument> {
     match extension.as_str() {
         "epub" => load_epub(path),
         "txt" => load_txt(path),
-        other => bail!("Unsupported book format {other:?}. v1 supports EPUB and TXT."),
+        other => bail!("Unsupported book format {other:?}. Reader supports EPUB and TXT."),
     }
 }
 
@@ -280,6 +404,29 @@ fn fallback_title(path: &Path) -> String {
         .to_string()
 }
 
+pub fn author_from_txt_path(path: &Path) -> Option<String> {
+    let stem = path.file_stem().and_then(|value| value.to_str())?;
+
+    if let Some((_, tail)) = stem.rsplit_once(" - ") {
+        let trimmed = tail.trim();
+        if !trimmed.is_empty() {
+            return Some(trimmed.to_string());
+        }
+    }
+
+    if let Some(open) = stem.rfind('(') {
+        let after = &stem[open + 1..];
+        if let Some(close) = after.rfind(')') {
+            let inside = after[..close].trim();
+            if !inside.is_empty() {
+                return Some(inside.to_string());
+            }
+        }
+    }
+
+    None
+}
+
 fn stable_book_id(path: &Path, title: &str) -> String {
     let mut hasher = Sha256::new();
     hasher.update(path.to_string_lossy().as_bytes());
@@ -417,7 +564,42 @@ mod tests {
         };
         let results = document.search("rust");
         assert_eq!(results.len(), 1);
-        assert_eq!(results[0].section_index, 0);
+        assert_eq!(results[0].position, TextPosition::new(0, 6));
+    }
+
+    #[test]
+    fn search_positions_follow_source_chars_when_lowercase_expands() {
+        let document = BookDocument {
+            id: "id".into(),
+            title: "Title".into(),
+            path: PathBuf::new(),
+            format: BookFormat::Txt,
+            metadata: BookMetadata {
+                title: "Title".into(),
+                author: None,
+                language: None,
+                publisher: None,
+                format: BookFormat::Txt,
+                path: PathBuf::new(),
+                section_count: 1,
+            },
+            sections: vec![Section {
+                title: "A".into(),
+                text: "İX".into(),
+            }],
+        };
+
+        assert_eq!(document.search("x")[0].position, TextPosition::new(0, 1));
+    }
+
+    #[test]
+    fn zero_percent_is_the_first_chapter_even_when_it_is_empty() {
+        let metrics = ContentMetrics {
+            section_char_counts: vec![0, 10],
+        };
+
+        assert_eq!(metrics.position_at_tenths(0), TextPosition::new(0, 0));
+        assert_eq!(metrics.position_at_tenths(1000), TextPosition::new(1, 10));
     }
 
     #[test]
@@ -517,5 +699,47 @@ mod tests {
         let html = r#"<html><head><title>   </title></head><body><p>Body</p></body></html>"#;
 
         assert_eq!(chapter_title_from_html(html), None);
+    }
+
+    #[test]
+    fn txt_author_dash_pattern_takes_last_segment() {
+        let path = Path::new("A Grammar of the English - William Cobbett.txt");
+        assert_eq!(
+            author_from_txt_path(path).as_deref(),
+            Some("William Cobbett")
+        );
+    }
+
+    #[test]
+    fn txt_author_dash_pattern_handles_inner_dashes() {
+        let path = Path::new("Letters - Jean-Paul Sartre.txt");
+        assert_eq!(
+            author_from_txt_path(path).as_deref(),
+            Some("Jean-Paul Sartre")
+        );
+    }
+
+    #[test]
+    fn txt_author_parenthetical_pattern() {
+        let path = Path::new("Pride and Prejudice (Jane Austen).txt");
+        assert_eq!(author_from_txt_path(path).as_deref(), Some("Jane Austen"));
+    }
+
+    #[test]
+    fn txt_author_returns_none_for_plain_title() {
+        let path = Path::new("Untitled.txt");
+        assert_eq!(author_from_txt_path(path), None);
+    }
+
+    #[test]
+    fn txt_author_dash_pattern_trims_whitespace() {
+        let path = Path::new("Notes -   Ada Lovelace   .txt");
+        assert_eq!(author_from_txt_path(path).as_deref(), Some("Ada Lovelace"));
+    }
+
+    #[test]
+    fn txt_author_empty_after_dash_is_ignored() {
+        let path = Path::new("Title - .txt");
+        assert_eq!(author_from_txt_path(path), None);
     }
 }

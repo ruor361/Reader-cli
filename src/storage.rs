@@ -1,8 +1,14 @@
+use std::collections::HashSet;
 use std::path::{Path, PathBuf};
+use std::time::SystemTime;
 
 use anyhow::{bail, Context, Result};
 
-use crate::book::{BookDocument, BookFormat};
+use crate::book::{
+    author_from_txt_path, load_book, BookDocument, BookFormat, ContentMetrics, TextPosition,
+};
+
+pub const LIBRARY_SCHEMA_VERSION: u32 = 2;
 
 #[derive(Debug)]
 pub struct Store {
@@ -10,45 +16,83 @@ pub struct Store {
     library: Library,
 }
 
-#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct Library {
+    #[serde(default = "current_schema_version")]
+    pub schema_version: u32,
+    #[serde(default)]
     pub books: Vec<LibraryBook>,
+    #[serde(default)]
     pub last_book_id: Option<String>,
+}
+
+impl Default for Library {
+    fn default() -> Self {
+        Self {
+            schema_version: LIBRARY_SCHEMA_VERSION,
+            books: Vec::new(),
+            last_book_id: None,
+        }
+    }
 }
 
 #[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
 pub struct LibraryBook {
     pub id: String,
     pub title: String,
+    #[serde(default)]
+    pub author: Option<String>,
     pub path: PathBuf,
     pub format: BookFormat,
+    #[serde(default)]
+    pub content_metrics: ContentMetrics,
+    #[serde(default)]
     pub progress: Progress,
+    #[serde(default)]
+    pub last_opened: Option<SystemTime>,
+    #[serde(default)]
+    pub missing: bool,
+    #[serde(default)]
     pub bookmarks: Vec<Bookmark>,
+}
+
+impl LibraryBook {
+    pub fn progress_tenths(&self) -> u16 {
+        self.content_metrics.progress_tenths(self.progress.position)
+    }
+
+    pub fn progress_percent(&self) -> u16 {
+        (self.progress_tenths() + 5) / 10
+    }
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Progress {
-    pub page: usize,
-    pub section_index: usize,
-    pub start_line: usize,
+    pub position: TextPosition,
+}
+
+impl Progress {
+    pub const fn new(position: TextPosition) -> Self {
+        Self { position }
+    }
+}
+
+impl From<TextPosition> for Progress {
+    fn from(position: TextPosition) -> Self {
+        Self::new(position)
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
 pub struct Bookmark {
     pub id: String,
     pub label: String,
-    pub page: usize,
-    pub section_index: usize,
-    pub start_line: usize,
+    pub position: TextPosition,
 }
 
 impl Bookmark {
-    pub fn progress(&self) -> Progress {
-        Progress {
-            page: self.page,
-            section_index: self.section_index,
-            start_line: self.start_line,
-        }
+    pub const fn progress(&self) -> Progress {
+        Progress::new(self.position)
     }
 }
 
@@ -60,17 +104,27 @@ impl Library {
 
 impl Store {
     pub fn open_default() -> Result<Self> {
-        let config_dir = dirs::config_dir()
-            .with_context(|| "Could not locate a user config directory")?
-            .join("reader");
-        Self::open(config_dir.join("library.json"))
+        Self::open(crate::paths::library_path()?)
     }
 
     pub fn open(path: PathBuf) -> Result<Self> {
         let library = if path.exists() {
             let text = std::fs::read_to_string(&path)
                 .with_context(|| format!("Failed to read {}", path.display()))?;
-            serde_json::from_str(&text).with_context(|| format!("Invalid {}", path.display()))?
+            match decode_library(&text) {
+                Ok(library) => library,
+                Err(err) => {
+                    eprintln!(
+                        "warning: {} is corrupt ({err}); initializing a fresh library. \
+                         The old file was preserved as {}.corrupt.",
+                        path.display(),
+                        path.display(),
+                    );
+                    let backup = path.with_extension("json.corrupt");
+                    let _ = std::fs::rename(&path, &backup);
+                    Library::default()
+                }
+            }
         } else {
             Library::default()
         };
@@ -99,6 +153,12 @@ impl Store {
             .as_ref()
             .canonicalize()
             .unwrap_or_else(|_| path.as_ref().to_path_buf());
+        let author = document
+            .metadata
+            .author
+            .clone()
+            .or_else(|| author_from_txt_path(path.as_ref()));
+        let content_metrics = document.content_metrics();
 
         if let Some(index) = self
             .library
@@ -106,9 +166,15 @@ impl Store {
             .iter()
             .position(|book| book.id == document.id)
         {
-            self.library.books[index].title = document.title.clone();
-            self.library.books[index].path = canonical;
-            self.library.books[index].format = document.format;
+            let book = &mut self.library.books[index];
+            book.title = document.title.clone();
+            book.path = canonical;
+            book.format = document.format;
+            book.missing = false;
+            if book.author.is_none() {
+                book.author = author;
+            }
+            apply_metrics(book, content_metrics);
             self.library.last_book_id = Some(document.id.clone());
             return Ok(&self.library.books[index]);
         }
@@ -116,14 +182,64 @@ impl Store {
         self.library.books.push(LibraryBook {
             id: document.id.clone(),
             title: document.title.clone(),
+            author,
             path: canonical,
             format: document.format,
+            content_metrics,
             progress: Progress::default(),
+            last_opened: None,
+            missing: false,
             bookmarks: Vec::new(),
         });
         self.library.last_book_id = Some(document.id.clone());
-        let index = self.library.books.len() - 1;
-        Ok(&self.library.books[index])
+        Ok(self.library.books.last().expect("book was just inserted"))
+    }
+
+    pub fn update_document_metrics(&mut self, book_id: &str, document: &BookDocument) {
+        if let Some(book) = self
+            .library
+            .books
+            .iter_mut()
+            .find(|book| book.id == book_id)
+        {
+            apply_metrics(book, document.content_metrics());
+        }
+    }
+
+    pub fn restore_reading_state(&mut self, book_id: &str, restored: LibraryBook) {
+        let Some(book) = self
+            .library
+            .books
+            .iter_mut()
+            .find(|book| book.id == book_id)
+        else {
+            return;
+        };
+        if book.author.is_none() {
+            book.author = restored.author;
+        }
+        book.progress = Progress::new(book.content_metrics.clamp(restored.progress.position));
+        book.bookmarks = restored
+            .bookmarks
+            .into_iter()
+            .map(|mut bookmark| {
+                bookmark.position = book.content_metrics.clamp(bookmark.position);
+                bookmark
+            })
+            .collect();
+        book.last_opened = restored.last_opened;
+    }
+
+    pub fn record_open(&mut self, book_id: &str) {
+        if let Some(book) = self
+            .library
+            .books
+            .iter_mut()
+            .find(|book| book.id == book_id)
+        {
+            book.last_opened = Some(SystemTime::now());
+            self.library.last_book_id = Some(book_id.to_string());
+        }
     }
 
     pub fn resolve_book(&self, query: &str) -> Result<&LibraryBook> {
@@ -140,6 +256,37 @@ impl Store {
             [] => bail!("Book not found: {query}"),
             _ => bail!("Book query is ambiguous: {query}"),
         }
+    }
+
+    pub fn book_by_id(&self, book_id: &str) -> Option<&LibraryBook> {
+        self.library.books.iter().find(|book| book.id == book_id)
+    }
+
+    pub fn book_by_path(&self, path: &Path) -> Option<&LibraryBook> {
+        let canonical = path.canonicalize().ok();
+        self.library.books.iter().find(|book| {
+            if let (Some(left), Some(right)) = (book.path.canonicalize().ok(), canonical.as_ref()) {
+                left == *right
+            } else {
+                book.path == path
+            }
+        })
+    }
+
+    pub fn mark_missing(&mut self, book_id: &str, missing: bool) -> bool {
+        let Some(book) = self
+            .library
+            .books
+            .iter_mut()
+            .find(|book| book.id == book_id)
+        else {
+            return false;
+        };
+        if book.missing == missing {
+            return false;
+        }
+        book.missing = missing;
+        true
     }
 
     pub fn last_book(&self) -> Result<Option<&LibraryBook>> {
@@ -165,11 +312,11 @@ impl Store {
     }
 
     pub fn progress_for(&self, book_id: &str) -> Option<&Progress> {
-        self.library
-            .books
-            .iter()
-            .find(|book| book.id == book_id)
-            .map(|book| &book.progress)
+        self.book_by_id(book_id).map(|book| &book.progress)
+    }
+
+    pub fn progress_tenths_for(&self, book_id: &str) -> Option<u16> {
+        self.book_by_id(book_id).map(LibraryBook::progress_tenths)
     }
 
     pub fn set_progress(&mut self, book_id: &str, progress: Progress) {
@@ -179,7 +326,8 @@ impl Store {
             .iter_mut()
             .find(|book| book.id == book_id)
         {
-            book.progress = progress;
+            book.progress = Progress::new(book.content_metrics.clamp(progress.position));
+            book.missing = false;
             self.library.last_book_id = Some(book_id.to_string());
         }
     }
@@ -197,21 +345,16 @@ impl Store {
             .find(|book| book.id == book_id)
             .with_context(|| format!("Book not found: {book_id}"))?;
         let bookmark = Bookmark {
-            id: format!("bm-{}", book.bookmarks.len() + 1),
+            id: next_bookmark_id(&book.bookmarks),
             label,
-            page: progress.page,
-            section_index: progress.section_index,
-            start_line: progress.start_line,
+            position: book.content_metrics.clamp(progress.position),
         };
         book.bookmarks.push(bookmark.clone());
         Ok(bookmark)
     }
 
     pub fn bookmarks_for(&self, book_id: &str) -> &[Bookmark] {
-        self.library
-            .books
-            .iter()
-            .find(|book| book.id == book_id)
+        self.book_by_id(book_id)
             .map(|book| book.bookmarks.as_slice())
             .unwrap_or(&[])
     }
@@ -236,14 +379,271 @@ impl Store {
             .with_context(|| format!("Bookmark not found: {bookmark_id}"))?;
         Ok(book.bookmarks.remove(index))
     }
+
+    pub fn scan_lib_dir(&mut self, dir: &Path) -> ScanDirResult {
+        let mut result = ScanDirResult::default();
+        let Some(entries) = std::fs::read_dir(dir).ok() else {
+            return result;
+        };
+        let existing_paths: HashSet<_> = self
+            .library
+            .books
+            .iter()
+            .filter_map(|book| book.path.canonicalize().ok())
+            .collect();
+
+        for entry in entries.filter_map(|entry| entry.ok()) {
+            let path = entry.path();
+            let extension = path
+                .extension()
+                .and_then(|extension| extension.to_str())
+                .unwrap_or_default()
+                .to_ascii_lowercase();
+            if extension != "epub" && extension != "txt" {
+                continue;
+            }
+            if path
+                .canonicalize()
+                .ok()
+                .is_some_and(|canonical| existing_paths.contains(&canonical))
+            {
+                continue;
+            }
+
+            let document = match load_book(&path) {
+                Ok(document) => document,
+                Err(err) => {
+                    result.errors.push((path, err.to_string()));
+                    continue;
+                }
+            };
+            let is_new = !self.library.books.iter().any(|book| book.id == document.id);
+            if let Err(err) = self.add_book(&document, &path) {
+                result.errors.push((path, err.to_string()));
+            } else if is_new {
+                result.imported += 1;
+            } else {
+                result.updated += 1;
+            }
+        }
+
+        if result.imported > 0 || result.updated > 0 {
+            let _ = self.save();
+        }
+        result
+    }
+}
+
+fn current_schema_version() -> u32 {
+    LIBRARY_SCHEMA_VERSION
+}
+
+fn apply_metrics(book: &mut LibraryBook, metrics: ContentMetrics) {
+    book.progress = Progress::new(metrics.clamp(book.progress.position));
+    for bookmark in &mut book.bookmarks {
+        bookmark.position = metrics.clamp(bookmark.position);
+    }
+    book.content_metrics = metrics;
+}
+
+fn next_bookmark_id(bookmarks: &[Bookmark]) -> String {
+    let next = bookmarks
+        .iter()
+        .filter_map(|bookmark| bookmark.id.strip_prefix("bm-")?.parse::<usize>().ok())
+        .max()
+        .unwrap_or(0)
+        + 1;
+    format!("bm-{next}")
+}
+
+fn decode_library(text: &str) -> serde_json::Result<Library> {
+    let value: serde_json::Value = serde_json::from_str(text)?;
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    if version >= u64::from(LIBRARY_SCHEMA_VERSION) {
+        let mut library: Library = serde_json::from_value(value)?;
+        normalize_library_positions(&mut library);
+        Ok(library)
+    } else {
+        let legacy: LegacyLibrary = serde_json::from_value(value)?;
+        Ok(migrate_legacy_library(legacy))
+    }
+}
+
+pub(crate) fn decode_book_value(value: serde_json::Value) -> serde_json::Result<LibraryBook> {
+    let is_v2 = value
+        .get("progress")
+        .and_then(|progress| progress.get("position"))
+        .is_some()
+        || value.get("content_metrics").is_some();
+    let mut book = if is_v2 {
+        serde_json::from_value(value)
+    } else {
+        let legacy: LegacyLibraryBook = serde_json::from_value(value)?;
+        Ok(migrate_legacy_book(legacy))
+    }?;
+    normalize_book_positions(&mut book);
+    Ok(book)
+}
+
+fn normalize_library_positions(library: &mut Library) {
+    for book in &mut library.books {
+        normalize_book_positions(book);
+    }
+}
+
+fn normalize_book_positions(book: &mut LibraryBook) {
+    if book.content_metrics.section_char_counts.is_empty() {
+        return;
+    }
+    book.progress.position = book.content_metrics.clamp(book.progress.position);
+    for bookmark in &mut book.bookmarks {
+        bookmark.position = book.content_metrics.clamp(bookmark.position);
+    }
+}
+
+fn migrate_legacy_library(legacy: LegacyLibrary) -> Library {
+    Library {
+        schema_version: LIBRARY_SCHEMA_VERSION,
+        books: legacy.books.into_iter().map(migrate_legacy_book).collect(),
+        last_book_id: legacy.last_book_id,
+    }
+}
+
+fn migrate_legacy_book(legacy: LegacyLibraryBook) -> LibraryBook {
+    let document = load_book(&legacy.path).ok();
+    let metrics = document
+        .as_ref()
+        .map(BookDocument::content_metrics)
+        .unwrap_or_default();
+    let progress = migrate_legacy_position(legacy.progress, legacy.page_count, &metrics);
+    let bookmarks = legacy
+        .bookmarks
+        .into_iter()
+        .map(|bookmark| Bookmark {
+            id: bookmark.id,
+            label: bookmark.label,
+            position: migrate_legacy_position(
+                LegacyProgress {
+                    page: bookmark.page,
+                    section_index: bookmark.section_index,
+                    start_line: bookmark.start_line,
+                },
+                legacy.page_count,
+                &metrics,
+            )
+            .position,
+        })
+        .collect();
+
+    LibraryBook {
+        id: legacy.id,
+        title: legacy.title,
+        author: legacy.author,
+        path: legacy.path,
+        format: legacy.format,
+        content_metrics: metrics,
+        progress,
+        last_opened: legacy.last_opened,
+        missing: legacy.missing,
+        bookmarks,
+    }
+}
+
+fn migrate_legacy_position(
+    legacy: LegacyProgress,
+    page_count: Option<usize>,
+    metrics: &ContentMetrics,
+) -> Progress {
+    if !metrics.section_char_counts.is_empty() {
+        if let Some(page_count) = page_count.filter(|count| *count > 1) {
+            let page = legacy.page.min(page_count - 1);
+            let tenths = ((page as u128 * 1000) / (page_count - 1) as u128) as u16;
+            return Progress::new(metrics.position_at_tenths(tenths));
+        }
+        return Progress::new(metrics.clamp(TextPosition::new(legacy.section_index, 0)));
+    }
+    Progress::new(TextPosition::new(legacy.section_index, 0))
+}
+
+#[derive(Debug, Clone, Default, serde::Deserialize)]
+struct LegacyLibrary {
+    #[serde(default)]
+    books: Vec<LegacyLibraryBook>,
+    #[serde(default)]
+    last_book_id: Option<String>,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LegacyLibraryBook {
+    id: String,
+    title: String,
+    #[serde(default)]
+    author: Option<String>,
+    path: PathBuf,
+    format: BookFormat,
+    #[serde(default)]
+    progress: LegacyProgress,
+    #[serde(default)]
+    page_count: Option<usize>,
+    #[serde(default)]
+    last_opened: Option<SystemTime>,
+    #[serde(default)]
+    missing: bool,
+    #[serde(default)]
+    bookmarks: Vec<LegacyBookmark>,
+}
+
+#[derive(Debug, Clone, Copy, Default, serde::Deserialize)]
+struct LegacyProgress {
+    #[serde(default)]
+    page: usize,
+    #[serde(default)]
+    section_index: usize,
+    #[serde(default)]
+    #[allow(dead_code)]
+    start_line: usize,
+}
+
+#[derive(Debug, Clone, serde::Deserialize)]
+struct LegacyBookmark {
+    id: String,
+    label: String,
+    #[serde(default)]
+    page: usize,
+    #[serde(default)]
+    section_index: usize,
+    #[serde(default)]
+    start_line: usize,
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+pub struct ScanDirResult {
+    pub imported: usize,
+    pub updated: usize,
+    pub errors: Vec<(PathBuf, String)>,
+}
+
+impl ScanDirResult {
+    pub fn merge(&mut self, other: ScanDirResult) {
+        self.imported += other.imported;
+        self.updated += other.updated;
+        self.errors.extend(other.errors);
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::book::{BookDocument, BookMetadata, Section};
+    use crate::book::{BookMetadata, Section};
 
     fn document(id: &str, title: &str, path: PathBuf) -> BookDocument {
+        let sections = vec![Section {
+            title: "One".into(),
+            text: "alpha beta gamma delta".into(),
+        }];
         BookDocument {
             id: id.into(),
             title: title.into(),
@@ -256,104 +656,109 @@ mod tests {
                 publisher: None,
                 format: BookFormat::Txt,
                 path,
-                section_count: 1,
+                section_count: sections.len(),
             },
-            sections: vec![Section {
-                title: "A".into(),
-                text: "Hello".into(),
-            }],
+            sections,
         }
     }
 
     #[test]
-    fn saves_and_loads_library() {
+    fn progress_and_bookmarks_round_trip_with_stable_positions() {
         let dir = tempfile::tempdir().unwrap();
-        let path = dir.path().join("library.json");
-        let document = document("abc", "Book", dir.path().join("book.txt"));
-
-        let mut store = Store::open(path.clone()).unwrap();
-        store.add_book(&document, &document.path).unwrap();
-        store.set_progress(
-            "abc",
-            Progress {
-                page: 2,
-                section_index: 0,
-                start_line: 4,
-            },
-        );
+        let path = dir.path().join("book.txt");
+        std::fs::write(&path, "alpha beta gamma delta").unwrap();
+        let document = document("book", "Book", path.clone());
+        let store_path = dir.path().join("library.json");
+        let mut store = Store::open(store_path.clone()).unwrap();
+        store.add_book(&document, &path).unwrap();
+        let progress = Progress::new(TextPosition::new(0, 11));
+        store.set_progress("book", progress);
+        store
+            .add_bookmark("book", "Point".into(), progress)
+            .unwrap();
         store.save().unwrap();
 
-        let loaded = Store::open(path).unwrap();
-        assert_eq!(loaded.resolve_book("Book").unwrap().progress.page, 2);
+        let loaded = Store::open(store_path).unwrap();
+        let book = loaded.resolve_book("Book").unwrap();
+        assert_eq!(book.progress, progress);
+        assert_eq!(book.bookmarks[0].position, progress.position);
+        assert_eq!(loaded.library.schema_version, LIBRARY_SCHEMA_VERSION);
     }
 
     #[test]
-    fn resolves_by_id_or_unique_title_fragment() {
+    fn v1_page_progress_migrates_by_ratio() {
         let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(dir.path().join("library.json")).unwrap();
-        let rust = document("rust-id", "Rust Book", dir.path().join("rust.txt"));
-        let poetry = document("poem-id", "Poetry", dir.path().join("poetry.txt"));
+        let book_path = dir.path().join("legacy.txt");
+        std::fs::write(&book_path, "abcdefghij").unwrap();
+        let json = serde_json::json!({
+            "books": [{
+                "id": "legacy",
+                "title": "Legacy",
+                "path": book_path,
+                "format": "Txt",
+                "progress": {"page": 5, "section_index": 0, "start_line": 20},
+                "page_count": 11,
+                "bookmarks": [{
+                    "id": "bm-1", "label": "Half", "page": 5,
+                    "section_index": 0, "start_line": 20
+                }]
+            }]
+        });
 
-        store.add_book(&rust, &rust.path).unwrap();
-        store.add_book(&poetry, &poetry.path).unwrap();
-
-        assert_eq!(store.resolve_book("rust-id").unwrap().title, "Rust Book");
-        assert_eq!(store.resolve_book("poet").unwrap().id, "poem-id");
-    }
-
-    #[test]
-    fn rejects_ambiguous_title_fragments() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(dir.path().join("library.json")).unwrap();
-        let first = document("one", "Rust Notes", dir.path().join("one.txt"));
-        let second = document("two", "Rust Guide", dir.path().join("two.txt"));
-
-        store.add_book(&first, &first.path).unwrap();
-        store.add_book(&second, &second.path).unwrap();
-
-        let err = store.resolve_book("rust").unwrap_err();
-        assert!(err.to_string().contains("ambiguous"));
-    }
-
-    #[test]
-    fn removing_last_book_moves_recent_to_remaining_book() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(dir.path().join("library.json")).unwrap();
-        let first = document("one", "One", dir.path().join("one.txt"));
-        let second = document("two", "Two", dir.path().join("two.txt"));
-
-        store.add_book(&first, &first.path).unwrap();
-        store.add_book(&second, &second.path).unwrap();
-        let removed = store.remove_book("two").unwrap();
-
-        assert_eq!(removed.id, "two");
-        assert_eq!(store.library().last_book_id.as_deref(), Some("one"));
-    }
-
-    #[test]
-    fn adds_finds_and_deletes_bookmarks() {
-        let dir = tempfile::tempdir().unwrap();
-        let mut store = Store::open(dir.path().join("library.json")).unwrap();
-        let book = document("book", "Book", dir.path().join("book.txt"));
-        let progress = Progress {
-            page: 4,
-            section_index: 1,
-            start_line: 20,
-        };
-
-        store.add_book(&book, &book.path).unwrap();
-        let bookmark = store
-            .add_bookmark("book", "Important".to_string(), progress)
-            .unwrap();
-
-        assert_eq!(bookmark.id, "bm-1");
+        let library = decode_library(&json.to_string()).unwrap();
+        assert_eq!(library.books[0].progress.position, TextPosition::new(0, 5));
         assert_eq!(
-            store.bookmark_for("book", "bm-1").unwrap().progress(),
-            progress
+            library.books[0].bookmarks[0].position,
+            TextPosition::new(0, 5)
         );
+    }
 
-        let removed = store.delete_bookmark("book", "bm-1").unwrap();
-        assert_eq!(removed.label, "Important");
-        assert!(store.bookmark_for("book", "bm-1").is_none());
+    #[test]
+    fn v1_without_page_count_falls_back_to_chapter_start() {
+        let value = serde_json::json!({
+            "id": "missing", "title": "Missing", "path": "missing.txt", "format": "Txt",
+            "progress": {"page": 7, "section_index": 3, "start_line": 20},
+            "bookmarks": []
+        });
+        let book = decode_book_value(value).unwrap();
+        assert_eq!(book.progress.position, TextPosition::new(3, 0));
+    }
+
+    #[test]
+    fn v2_out_of_range_positions_are_clamped_on_load() {
+        let json = serde_json::json!({
+            "schema_version": 2,
+            "books": [{
+                "id": "book", "title": "Book", "path": "book.txt", "format": "Txt",
+                "content_metrics": {"section_char_counts": [10]},
+                "progress": {"position": {"section_index": 99, "char_offset": 99}},
+                "bookmarks": [{
+                    "id": "bm-1", "label": "End",
+                    "position": {"section_index": 99, "char_offset": 99}
+                }]
+            }]
+        });
+
+        let library = decode_library(&json.to_string()).unwrap();
+
+        assert_eq!(library.books[0].progress.position, TextPosition::new(0, 10));
+        assert_eq!(
+            library.books[0].bookmarks[0].position,
+            TextPosition::new(0, 10)
+        );
+    }
+
+    #[test]
+    fn record_open_only_updates_recency() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.txt");
+        std::fs::write(&path, "alpha").unwrap();
+        let document = document("book", "Book", path.clone());
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        store.add_book(&document, path).unwrap();
+
+        store.record_open("book");
+
+        assert!(store.resolve_book("Book").unwrap().last_opened.is_some());
     }
 }
