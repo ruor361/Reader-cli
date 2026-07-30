@@ -1,21 +1,27 @@
 use ratatui::layout::{Alignment, Constraint, Direction, Layout, Rect};
-use ratatui::style::Modifier;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
-use crate::privacy::{privacy_stack, PRIVACY_ERROR_LINE};
+use crate::book::ContentsSource;
+use crate::discreet::{discreet_layout, discreet_stack, LogLevel, DISCREET_ERROR_LINE};
 use crate::reader_input::READING_BINDINGS;
 use crate::reader_state::{
-    format_tenths, privacy_chunks, ChapterNavigator, NotificationKind, Overlay, ReaderState,
+    discreet_chunks, format_tenths, ContentsNavigator, NotificationKind, Overlay, ReaderState,
 };
-use crate::ui::{action_line, centered_rect, fill_background, help_lines, hud_chunks, Palette};
+use crate::ui::{
+    action_line, centered_rect, fill_background, help_lines, hud_chunks, DiscreetLogColors, Palette,
+};
 
 pub(crate) fn draw(frame: &mut ratatui::Frame<'_>, state: &ReaderState) {
-    let palette = Palette::for_theme(state.config.theme);
+    let palette = Palette::terminal();
     fill_background(frame, palette);
-    if state.config.privacy_mode {
-        draw_privacy(frame, state, palette);
+    if state.hidden {
+        draw_hidden(frame, palette);
+        return;
+    }
+    if state.config.discreet_mode {
+        draw_discreet(frame, state, palette);
         return;
     }
 
@@ -51,7 +57,7 @@ pub(crate) fn draw(frame: &mut ratatui::Frame<'_>, state: &ReaderState) {
     match &state.overlay {
         Overlay::None => {}
         Overlay::Percent(navigator) => draw_percent(frame, navigator, palette),
-        Overlay::Chapters(navigator) => draw_chapters(frame, state, navigator, palette),
+        Overlay::Contents(navigator) => draw_contents(frame, state, navigator, palette),
         Overlay::Search(input) => draw_search(frame, input, palette),
         Overlay::Metadata => draw_metadata(frame, state, palette),
         Overlay::Help => draw_help(frame, palette),
@@ -61,6 +67,7 @@ pub(crate) fn draw(frame: &mut ratatui::Frame<'_>, state: &ReaderState) {
 fn status_line(state: &ReaderState, palette: Palette) -> Line<'static> {
     let section_index = state.current_section();
     let section_count = state.document.sections.len();
+    let section_label = state.document.format.section_label();
     let section_title = state
         .document
         .sections
@@ -72,7 +79,11 @@ fn status_line(state: &ReaderState, palette: Palette) -> Line<'static> {
         let mut spans = vec![
             Span::styled(truncate_width(&state.document.title, 22), palette.accent()),
             Span::styled(
-                format!("  Ch {}/{}", section_index + 1, section_count.max(1)),
+                format!(
+                    "  {section_label} {}/{}",
+                    section_index + 1,
+                    section_count.max(1)
+                ),
                 palette.body(),
             ),
         ];
@@ -90,7 +101,7 @@ fn status_line(state: &ReaderState, palette: Palette) -> Line<'static> {
         Span::styled("  ·  ", palette.muted()),
         Span::styled(
             format!(
-                "Chapter {}/{}: {}",
+                "{section_label} {}/{}: {}",
                 section_index + 1,
                 section_count.max(1),
                 truncate_width(section_title, 36)
@@ -114,7 +125,7 @@ fn context_action_line(state: &ReaderState, palette: Palette) -> Line<'static> {
             &[("Enter", "Jump"), ("Backspace", "Edit"), ("Esc", "Cancel")],
             palette,
         ),
-        Overlay::Chapters(navigator) if navigator.filter_active => prompt_actions(
+        Overlay::Contents(navigator) if navigator.filter_active => prompt_actions(
             &[
                 ("Type", "Filter"),
                 ("Up/Down", "Select"),
@@ -123,7 +134,7 @@ fn context_action_line(state: &ReaderState, palette: Palette) -> Line<'static> {
             ],
             palette,
         ),
-        Overlay::Chapters(_) => prompt_actions(
+        Overlay::Contents(_) => prompt_actions(
             &[
                 ("j/k", "Select"),
                 ("0-9", "Number"),
@@ -168,6 +179,12 @@ fn reading_text_area(area: Rect, text_width: Option<u16>) -> Rect {
         width,
         area.height,
     )
+}
+
+fn left_aligned_reading_text_area(area: Rect, text_width: Option<u16>) -> Rect {
+    let mut text_area = reading_text_area(area, text_width);
+    text_area.x = area.x.saturating_add(u16::from(area.width > 1));
+    text_area
 }
 
 fn draw_notification(
@@ -243,15 +260,20 @@ fn draw_percent(
     );
 }
 
-fn draw_chapters(
+fn draw_contents(
     frame: &mut ratatui::Frame<'_>,
     state: &ReaderState,
-    navigator: &ChapterNavigator,
+    navigator: &ContentsNavigator,
     palette: Palette,
 ) {
     let area = centered_rect(78, 78, frame.area());
     frame.render_widget(Clear, area);
-    frame.render_widget(popup_block(" Chapters ", palette), area);
+    let title = if state.document.contents_source == ContentsSource::Generated {
+        " Contents (generated) "
+    } else {
+        " Contents "
+    };
+    frame.render_widget(popup_block(title, palette), area);
     let inner = area.inner(ratatui::layout::Margin {
         horizontal: 2,
         vertical: 1,
@@ -272,16 +294,16 @@ fn draw_chapters(
         ])
     } else {
         Line::from(vec![
-            Span::styled("Chapter number: ", palette.body()),
+            Span::styled("Entry number: ", palette.body()),
             Span::styled(navigator.number_input.clone(), palette.accent()),
         ])
     };
-    let count = state.visible_chapters(navigator).len();
+    let count = state.visible_contents(navigator).len();
     frame.render_widget(
         Paragraph::new(vec![
             prompt,
             Line::from(Span::styled(
-                format!("{count} matching chapters"),
+                format!("{count} matching entries"),
                 palette.muted(),
             )),
         ])
@@ -289,7 +311,7 @@ fn draw_chapters(
         chunks[0],
     );
 
-    let visible = state.visible_chapters(navigator);
+    let visible = state.visible_contents(navigator);
     let max_items = chunks[1].height as usize;
     let selected_row = visible
         .iter()
@@ -300,13 +322,11 @@ fn draw_chapters(
         .iter()
         .skip(start)
         .take(max_items)
-        .map(|&section_index| {
-            let text = format!(
-                " {:>4}  {} ",
-                section_index + 1,
-                state.document.sections[section_index].title
-            );
-            if section_index == navigator.selection {
+        .map(|&entry_index| {
+            let entry = &state.document.contents[entry_index];
+            let indentation = "  ".repeat(entry.depth.min(12));
+            let text = format!(" {:>4}  {indentation}{} ", entry_index + 1, entry.title);
+            if entry_index == navigator.selection {
                 Line::from(Span::styled(text, palette.selected()))
             } else {
                 Line::from(Span::styled(text, palette.body()))
@@ -368,7 +388,11 @@ fn draw_metadata(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
         metadata_line("Title", &metadata.title, palette),
         metadata_line("Format", metadata.format.label(), palette),
         metadata_line("Path", &metadata.path.display().to_string(), palette),
-        metadata_line("Chapters", &metadata.section_count.to_string(), palette),
+        metadata_line(
+            metadata.format.section_label_plural(),
+            &metadata.section_count.to_string(),
+            palette,
+        ),
     ];
     if let Some(author) = metadata.author.as_deref() {
         lines.push(metadata_line("Author", author, palette));
@@ -428,7 +452,7 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, palette: Palette) {
     );
     right.extend([
         Line::from(""),
-        Line::from(Span::styled("Chapter navigator", palette.accent())),
+        Line::from(Span::styled("Contents navigator", palette.accent())),
         Line::from(Span::styled(
             "  arrows/j/k browse · digits select · / filters",
             palette.body(),
@@ -444,49 +468,123 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, palette: Palette) {
     frame.render_widget(Paragraph::new(right).style(palette.popup()), columns[1]);
 }
 
-fn draw_privacy(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: Palette) {
-    let [stack_area, reading_area] = privacy_chunks(frame.area());
-    let stack_lines = privacy_lines(stack_area.height as usize, palette);
+fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: Palette) {
+    let log_colors = DiscreetLogColors::terminal();
+    let palette = palette.discreet_mode();
+    let [stack_area, reading_area, action_area] = discreet_chunks(frame.area());
     frame.render_widget(
-        Paragraph::new(stack_lines)
+        Paragraph::new(diagnostic_lines(palette))
             .style(palette.base())
             .wrap(Wrap { trim: false }),
         stack_area,
     );
-    let page = &state.pages[state.current_page];
+    let layout = discreet_layout(frame.area(), state.config.text_width);
+    let text_area = left_aligned_reading_text_area(reading_area, Some(layout.total_width()));
     frame.render_widget(
-        Paragraph::new(page.lines.join("\n")).style(
-            palette
-                .muted()
-                .add_modifier(Modifier::DIM)
-                .bg(palette.background),
-        ),
-        reading_area,
+        Paragraph::new(discreet_reading_lines(state, layout, palette, log_colors))
+            .style(palette.body())
+            .wrap(Wrap { trim: false }),
+        text_area,
+    );
+    let (start, end, total) = state.physical_row_range();
+    let status_area = Rect::new(
+        action_area.x.saturating_add(1),
+        action_area.y,
+        action_area.width.saturating_sub(1),
+        action_area.height,
+    );
+    frame.render_widget(
+        Paragraph::new(format!("rows {start}-{end}/{total}")).style(palette.muted()),
+        status_area,
+    );
+    if let Some(notification) = state.notification.as_ref() {
+        draw_notification(
+            frame,
+            reading_area,
+            notification.text.as_str(),
+            notification.kind,
+            palette,
+        );
+    }
+}
+
+fn discreet_reading_lines(
+    state: &ReaderState,
+    layout: crate::discreet::DiscreetLayout,
+    palette: Palette,
+    log_colors: DiscreetLogColors,
+) -> Vec<Line<'static>> {
+    let page = &state.pages[state.current_page];
+    let prefixes = state
+        .discreet_log
+        .as_ref()
+        .map(|log| log.prefixes(&page.lines, layout.prefix_mode))
+        .unwrap_or_else(|| vec![None; page.lines.len()]);
+    page.lines
+        .iter()
+        .zip(prefixes)
+        .map(|(body, prefix)| {
+            let Some(prefix) = prefix else {
+                return Line::from(Span::styled(body.clone(), palette.body()));
+            };
+            let level_color = match prefix.level {
+                LogLevel::Info => log_colors.info,
+                LogLevel::Warn => log_colors.warning,
+                LogLevel::Error => log_colors.error,
+            };
+            Line::from(vec![
+                Span::styled(prefix.leading, palette.muted()),
+                Span::styled(prefix.keyword, palette.base().fg(level_color)),
+                Span::styled(prefix.trailing, palette.muted()),
+                Span::styled(body.clone(), palette.body()),
+            ])
+        })
+        .collect()
+}
+
+fn draw_hidden(frame: &mut ratatui::Frame<'_>, palette: Palette) {
+    frame.render_widget(
+        Paragraph::new(diagnostic_lines(palette))
+            .style(palette.base())
+            .wrap(Wrap { trim: false }),
+        frame.area(),
     );
 }
 
-fn privacy_lines(height: usize, palette: Palette) -> Vec<Line<'static>> {
-    let source = privacy_stack()
+fn diagnostic_lines(palette: Palette) -> Vec<Line<'static>> {
+    discreet_stack()
         .lines()
         .map(|line| {
-            if line == PRIVACY_ERROR_LINE {
+            if line == DISCREET_ERROR_LINE || line.trim() == "^" {
                 Line::from(Span::styled(line.to_string(), palette.error()))
+            } else if let Some(frame) = stack_frame_line(line, palette) {
+                frame
             } else if line.trim().is_empty() {
                 Line::from(" ")
+            } else if line.contains("dist") && line.ends_with(":184") {
+                Line::from(Span::styled(line.to_string(), palette.muted()))
             } else {
                 Line::from(Span::styled(line.to_string(), palette.body()))
             }
         })
-        .collect::<Vec<_>>();
-    if height == 0 {
-        return source;
+        .collect()
+}
+
+fn stack_frame_line(line: &str, palette: Palette) -> Option<Line<'static>> {
+    let trimmed = line.trim_start();
+    let frame = trimmed.strip_prefix("at ")?;
+    let indent = " ".repeat(line.len().saturating_sub(trimmed.len()));
+    if let Some((function, location)) = frame.rsplit_once(" (") {
+        return Some(Line::from(vec![
+            Span::styled(format!("{indent}at "), palette.muted()),
+            Span::styled(function.to_string(), palette.body()),
+            Span::styled(format!(" ({location}"), palette.muted()),
+        ]));
     }
-    let mut lines = Vec::with_capacity(height);
-    while lines.len() < height {
-        lines.extend(source.iter().cloned());
-    }
-    lines.truncate(height);
-    lines
+    Some(Line::from(vec![
+        Span::styled(format!("{indent}at "), palette.muted()),
+        Span::styled(frame.to_string(), palette.body()),
+    ]))
 }
 
 fn truncate_width(text: &str, width: usize) -> String {
@@ -511,21 +609,20 @@ fn truncate_width(text: &str, width: usize) -> String {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::book::{BookDocument, BookFormat, BookMetadata, Section};
+    use crate::book::{
+        BookDocument, BookFormat, BookMetadata, ContentsEntry, ContentsSource, Section,
+    };
     use crate::config::ReaderConfig;
     use crate::storage::Progress;
-    use crate::ui::Theme;
     use ratatui::backend::TestBackend;
     use ratatui::Terminal;
 
-    fn state(theme: Theme) -> ReaderState {
+    fn state() -> ReaderState {
         let path = std::path::PathBuf::from("book.txt");
         let sections = vec![Section {
             title: "Opening".into(),
             text: "bright readable text".into(),
         }];
-        let mut config = ReaderConfig::default();
-        config.theme = theme;
         ReaderState::new(
             BookDocument {
                 id: "book".into(),
@@ -542,33 +639,85 @@ mod tests {
                     section_count: 1,
                 },
                 sections,
+                contents: vec![ContentsEntry {
+                    title: "Opening".into(),
+                    depth: 0,
+                    target: crate::book::TextPosition::new(0, 0),
+                }],
+                contents_source: ContentsSource::Generated,
             },
             "book".into(),
             Rect::new(0, 0, 80, 12),
-            config,
+            ReaderConfig::default(),
+            Progress::default(),
+        )
+    }
+
+    fn pdf_state() -> ReaderState {
+        let path = std::path::PathBuf::from("manual.pdf");
+        let sections = vec![
+            Section {
+                title: "Page 1".into(),
+                text: "first PDF page".into(),
+            },
+            Section {
+                title: "Page 2".into(),
+                text: "second PDF page".into(),
+            },
+        ];
+        ReaderState::new(
+            BookDocument {
+                id: "pdf".into(),
+                title: "Manual".into(),
+                path: path.clone(),
+                format: BookFormat::Pdf,
+                metadata: BookMetadata {
+                    title: "Manual".into(),
+                    author: Some("Writer".into()),
+                    language: None,
+                    publisher: None,
+                    format: BookFormat::Pdf,
+                    path,
+                    section_count: sections.len(),
+                },
+                sections,
+                contents: vec![
+                    ContentsEntry {
+                        title: "Introduction".into(),
+                        depth: 0,
+                        target: crate::book::TextPosition::new(0, 0),
+                    },
+                    ContentsEntry {
+                        title: "Nested topic".into(),
+                        depth: 1,
+                        target: crate::book::TextPosition::new(1, 0),
+                    },
+                ],
+                contents_source: ContentsSource::Document,
+            },
+            "pdf".into(),
+            Rect::new(0, 0, 80, 20),
+            ReaderConfig::default(),
             Progress::default(),
         )
     }
 
     #[test]
-    fn dark_and_light_themes_use_explicit_high_contrast_body_colors() {
-        for theme in [Theme::Dark, Theme::Light] {
-            let state = state(theme);
-            let backend = TestBackend::new(80, 12);
-            let mut terminal = Terminal::new(backend).unwrap();
-            terminal.draw(|frame| draw(frame, &state)).unwrap();
-            let cell = terminal.backend().buffer().cell((0, 1)).unwrap();
-            let palette = Palette::for_theme(theme);
-            assert_eq!(cell.fg, palette.body);
-            assert_eq!(cell.bg, palette.background);
-        }
+    fn reading_view_inherits_terminal_foreground_and_background() {
+        let state = state();
+        let backend = TestBackend::new(80, 12);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let cell = terminal.backend().buffer().cell((0, 1)).unwrap();
+        assert_eq!(cell.fg, ratatui::style::Color::Reset);
+        assert_eq!(cell.bg, ratatui::style::Color::Reset);
     }
 
     #[test]
     fn narrow_hud_keeps_core_keys() {
-        let mut state = state(Theme::Dark);
+        let mut state = state();
         state.resize(20, 12);
-        let line = context_action_line(&state, Palette::for_theme(Theme::Dark));
+        let line = context_action_line(&state, Palette::terminal());
         let text = line
             .spans
             .iter()
@@ -584,14 +733,14 @@ mod tests {
     fn every_reader_overlay_renders_with_its_context() {
         let cases = [
             (Overlay::Percent(Default::default()), "Go to percentage"),
-            (Overlay::Chapters(Default::default()), "Chapters"),
+            (Overlay::Contents(Default::default()), "Contents"),
             (Overlay::Search(Default::default()), "Search"),
             (Overlay::Metadata, "Book information"),
             (Overlay::Help, "Reader help"),
         ];
 
         for (overlay, expected) in cases {
-            let mut state = state(Theme::Dark);
+            let mut state = state();
             state.overlay = overlay;
             let backend = TestBackend::new(80, 20);
             let mut terminal = Terminal::new(backend).unwrap();
@@ -601,16 +750,237 @@ mod tests {
     }
 
     #[test]
-    fn privacy_render_hides_hud_and_metadata() {
-        let mut state = state(Theme::Dark);
-        state.config.privacy_mode = true;
+    fn generated_contents_are_explicitly_labeled() {
+        let mut state = state();
+        state.overlay = Overlay::Contents(Default::default());
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains("Contents (generated)"));
+    }
+
+    #[test]
+    fn pdf_reader_uses_page_and_contents_labels() {
+        let mut state = pdf_state();
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains("Page 1/2: Page 1"));
+
+        state.overlay = Overlay::Contents(Default::default());
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains("Contents"));
+        assert!(screen.contains("Entry number:"));
+        assert!(screen.contains("2 matching entries"));
+        assert!(screen.contains("Nested topic"));
+        assert!(screen.contains("    2    Nested topic"));
+
+        state.overlay = Overlay::Metadata;
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains("Format: PDF"));
+        assert!(screen.contains("Pages: 2"));
+    }
+
+    #[test]
+    fn discreet_render_hides_hud_and_metadata() {
+        let mut state = state();
+        state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
         state.overlay = Overlay::Metadata;
         let backend = TestBackend::new(80, 12);
         let mut terminal = Terminal::new(backend).unwrap();
         terminal.draw(|frame| draw(frame, &state)).unwrap();
         let screen = format!("{}", terminal.backend());
-        assert!(screen.contains("Uncaught TypeError"));
+        assert!(screen.contains("TypeError"));
+        assert!(screen.contains("bright readable text"));
+        assert!(screen.contains("rows 1-1/1"));
         assert!(!screen.contains("Book information"));
         assert!(!screen.contains("[g]"));
+        assert!(!screen.contains("F12"));
+        assert_eq!(screen.matches("TypeError").count(), 1);
+    }
+
+    #[test]
+    fn discreet_log_decoration_is_stable_between_redraws() {
+        let mut state = state();
+        state.resize(100, 18);
+        state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let first = format!("{}", terminal.backend());
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let second = format!("{}", terminal.backend());
+
+        assert_eq!(first, second);
+        assert!(
+            first.contains(" INFO  ") || first.contains(" WARN  ") || first.contains(" ERROR ")
+        );
+    }
+
+    #[test]
+    fn discreet_prefix_colors_only_the_level_keyword() {
+        let mut state = state();
+        state.resize(100, 18);
+        state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+
+        let palette = Palette::terminal().discreet_mode();
+        let colors = DiscreetLogColors::terminal();
+        let prefix = state.discreet_log.as_ref().unwrap().prefixes(
+            &state.pages[state.current_page].lines,
+            crate::discreet::DiscreetPrefixMode::Full,
+        )[0]
+        .clone()
+        .unwrap();
+        let expected_level_color = match prefix.level {
+            LogLevel::Info => colors.info,
+            LogLevel::Warn => colors.warning,
+            LogLevel::Error => colors.error,
+        };
+        let reading_y = discreet_chunks(Rect::new(0, 0, 100, 18))[1].y;
+        let text_x = 1;
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((text_x, reading_y))
+                .unwrap()
+                .fg,
+            palette.muted
+        );
+        let keyword_x = text_x + u16::try_from(prefix.leading.len()).unwrap();
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((keyword_x, reading_y))
+                .unwrap()
+                .fg,
+            expected_level_color
+        );
+        let trailing_x = keyword_x + u16::try_from(prefix.keyword.len()).unwrap();
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((trailing_x, reading_y))
+                .unwrap()
+                .fg,
+            palette.muted
+        );
+        assert_eq!(
+            terminal
+                .backend()
+                .buffer()
+                .cell((16, reading_y))
+                .unwrap()
+                .fg,
+            palette.body
+        );
+        assert_ne!(palette.body, expected_level_color);
+    }
+
+    #[test]
+    fn discreet_status_bar_only_shows_muted_physical_row_range() {
+        let mut state = state();
+        state.resize(100, 18);
+        state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
+        let backend = TestBackend::new(100, 18);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+
+        let discreet = Palette::terminal().discreet_mode();
+        let action_y = discreet_chunks(Rect::new(0, 0, 100, 18))[2].y;
+        let first_status_cell = terminal.backend().buffer().cell((1, action_y)).unwrap();
+        assert_eq!(first_status_cell.fg, discreet.muted);
+
+        let (start, end, total) = state.physical_row_range();
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains(&format!("rows {start}-{end}/{total}")));
+        for hidden_hint in ["[k]", "[j]", "Bookmark", "Normal", "F12"] {
+            assert!(!screen.contains(hidden_hint));
+        }
+    }
+
+    #[test]
+    fn hidden_render_contains_only_neutral_diagnostics() {
+        let mut state = state();
+        state.overlay = Overlay::Search(crate::reader_state::SearchInput {
+            query: "secret query".into(),
+            error: None,
+        });
+        state.notify("secret notification", NotificationKind::Info);
+        state.hidden = true;
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains("resolveActiveSession"));
+        for secret in [
+            "bright readable text",
+            "secret query",
+            "secret notification",
+            "Book information",
+            "DiscreetOverlay",
+            "PrivacyOverlay",
+        ] {
+            assert!(!screen.contains(secret), "leaked: {secret}");
+        }
+    }
+
+    #[test]
+    fn diagnostics_only_color_the_error_and_caret_red() {
+        let palette = Palette::terminal();
+        let lines = diagnostic_lines(palette);
+        let error = lines
+            .iter()
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content == DISCREET_ERROR_LINE)
+            })
+            .unwrap();
+        assert_eq!(error.spans[0].style.fg, Some(palette.error));
+        let caret = lines
+            .iter()
+            .find(|line| line.spans.iter().any(|span| span.content.trim() == "^"))
+            .unwrap();
+        assert_eq!(caret.spans[0].style.fg, Some(palette.error));
+        let stack = lines
+            .iter()
+            .find(|line| {
+                line.spans
+                    .iter()
+                    .any(|span| span.content.contains("resolveActiveSession"))
+            })
+            .unwrap();
+        assert!(stack
+            .spans
+            .iter()
+            .all(|span| span.style.fg != Some(palette.error)));
+    }
+
+    #[test]
+    fn discreet_reading_area_is_left_aligned() {
+        let area = Rect::new(10, 5, 120, 8);
+        let text_area = left_aligned_reading_text_area(area, Some(72));
+
+        assert_eq!(text_area.x, 11);
+        assert_eq!(text_area.width, 72);
+        assert_ne!(text_area.x, area.x + (area.width - text_area.width) / 2);
     }
 }

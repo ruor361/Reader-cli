@@ -1,8 +1,12 @@
 # Windows 构建环境
 
-本项目在 Windows 上统一使用 `x86_64-pc-windows-gnu` Rust 主机工具链。仓库内的
-`rust-toolchain.toml` 会让裸 `cargo` 命令自动选择它；不依赖 Visual Studio、Windows
-SDK 或 `link.exe`。
+仓库内的 `rust-toolchain.toml` 只选择宿主平台的 stable Rust，不再硬编码 Windows host
+或 build target。Linux、macOS 和 Windows 都默认本机构建，不会因为仓库配置而被迫交叉
+编译。
+
+Windows 可以使用 MSVC 或 GNU：安装了 Visual Studio Build Tools 时可直接运行裸
+`cargo`；不想依赖 Visual Studio、Windows SDK 或 `link.exe` 时，可以显式使用
+`x86_64-pc-windows-gnu`。以下内容是 GNU 路线，不会改变其他平台或仓库默认 target。
 
 ## 前置检查
 
@@ -39,15 +43,15 @@ rustup toolchain install stable-x86_64-pc-windows-gnu `
   --component clippy
 ```
 
-进入仓库后确认自动选择结果：
+进入仓库后确认 GNU 工具链结果。由于仓库不再强制 Windows GNU，每条 GNU 构建命令都
+显式带上完整 toolchain 名称：
 
 ```powershell
-rustup show active-toolchain
-cargo -vV
+cargo +stable-x86_64-pc-windows-gnu -vV
 ```
 
-`cargo -vV` 的 `host` 应为 `x86_64-pc-windows-gnu`。无需修改全局默认工具链，也无需在
-每条命令后附加 `+stable-gnu`。
+输出中的 `host` 应为 `x86_64-pc-windows-gnu`。无需修改全局默认工具链；裸 `cargo`
+仍使用当前 Windows 默认 host，显式的 `+stable-x86_64-pc-windows-gnu` 只作用于当次命令。
 
 ## rustup 下载中断恢复
 
@@ -90,19 +94,20 @@ rustup 缓存中的文件名就是 SHA-256，不带扩展名。重试时 rustup 
 ## 构建与验收
 
 ```powershell
-cargo run -- --help
-cargo fmt --all -- --check
-cargo clippy --all-targets -- -D warnings
-cargo test
+cargo +stable-x86_64-pc-windows-gnu run -- --help
+cargo +stable-x86_64-pc-windows-gnu fmt --all -- --check
+cargo +stable-x86_64-pc-windows-gnu clippy --all-targets -- -D warnings
+cargo +stable-x86_64-pc-windows-gnu test
 ```
 
 打开实际书籍：
 
 ```powershell
-cargo run -- "C:\path\to\book.epub"
-cargo run -- shelf
+cargo +stable-x86_64-pc-windows-gnu run -- "C:\path\to\book.epub"
+cargo +stable-x86_64-pc-windows-gnu run -- shelf
 ```
 
-如果报 `gcc` 或 `ar` 找不到，先修复 `PATH`；如果错误再次提到 `link.exe`，用
-`cargo -vV` 检查当前 host。只要仓库中的 `rust-toolchain.toml` 生效，host 就应是 GNU，
-不应回落到 MSVC。
+如果 GNU 命令报 `gcc` 或 `ar` 找不到，先修复 `PATH`。如果错误提到 `cl.exe` 或
+`link.exe`，通常表示误用了裸 `cargo`；用
+`cargo +stable-x86_64-pc-windows-gnu -vV` 检查当次 host。选择 MSVC 路线的开发者则应
+安装 Visual Studio Build Tools，并继续使用裸 `cargo`。

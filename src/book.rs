@@ -1,8 +1,10 @@
+use std::collections::HashMap;
 use std::fs::File;
 use std::io::{Read, Seek};
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use percent_encoding::percent_decode_str;
 use roxmltree::Document;
 use sha2::{Digest, Sha256};
 use zip::ZipArchive;
@@ -11,12 +13,26 @@ use zip::ZipArchive;
 pub enum BookFormat {
     Epub,
     Txt,
+    Pdf,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct Section {
     pub title: String,
     pub text: String,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ContentsEntry {
+    pub title: String,
+    pub depth: usize,
+    pub target: TextPosition,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ContentsSource {
+    Document,
+    Generated,
 }
 
 #[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -126,6 +142,8 @@ pub struct BookDocument {
     pub format: BookFormat,
     pub metadata: BookMetadata,
     pub sections: Vec<Section>,
+    pub contents: Vec<ContentsEntry>,
+    pub contents_source: ContentsSource,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -213,6 +231,23 @@ impl BookFormat {
         match self {
             BookFormat::Epub => "EPUB",
             BookFormat::Txt => "TXT",
+            BookFormat::Pdf => "PDF",
+        }
+    }
+
+    pub fn section_label(self) -> &'static str {
+        match self {
+            BookFormat::Epub => "Chapter",
+            BookFormat::Txt => "Section",
+            BookFormat::Pdf => "Page",
+        }
+    }
+
+    pub fn section_label_plural(self) -> &'static str {
+        match self {
+            BookFormat::Epub => "Chapters",
+            BookFormat::Txt => "Sections",
+            BookFormat::Pdf => "Pages",
         }
     }
 }
@@ -228,8 +263,20 @@ pub fn load_book(path: impl AsRef<Path>) -> Result<BookDocument> {
     match extension.as_str() {
         "epub" => load_epub(path),
         "txt" => load_txt(path),
-        other => bail!("Unsupported book format {other:?}. Reader supports EPUB and TXT."),
+        "pdf" => load_pdf(path),
+        other => bail!("Unsupported book format {other:?}. Reader supports EPUB, TXT, and PDF."),
     }
+}
+
+pub(crate) fn is_supported_book_path(path: &Path) -> bool {
+    matches!(
+        path.extension()
+            .and_then(|value| value.to_str())
+            .unwrap_or_default()
+            .to_ascii_lowercase()
+            .as_str(),
+        "epub" | "txt" | "pdf"
+    )
 }
 
 pub fn load_txt(path: &Path) -> Result<BookDocument> {
@@ -240,6 +287,7 @@ pub fn load_txt(path: &Path) -> Result<BookDocument> {
     let stable_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let id = stable_book_id(&stable_path, &title);
     let sections = split_txt_sections(&text);
+    let contents = generated_contents(&sections);
     let metadata = BookMetadata {
         title: title.clone(),
         author: None,
@@ -257,7 +305,35 @@ pub fn load_txt(path: &Path) -> Result<BookDocument> {
         format: BookFormat::Txt,
         metadata,
         sections,
+        contents,
+        contents_source: ContentsSource::Generated,
     })
+}
+
+#[derive(Debug, Clone)]
+struct ManifestItem {
+    path: String,
+    media_type: String,
+    properties: Vec<String>,
+}
+
+#[derive(Debug)]
+struct ExtractedXhtml {
+    text: String,
+    anchors: HashMap<String, usize>,
+}
+
+#[derive(Debug)]
+struct EpubSpineTarget {
+    section_index: usize,
+    anchors: HashMap<String, usize>,
+}
+
+#[derive(Debug)]
+struct RawContentsEntry {
+    title: String,
+    depth: usize,
+    href: String,
 }
 
 pub fn load_epub(path: &Path) -> Result<BookDocument> {
@@ -271,22 +347,33 @@ pub fn load_epub(path: &Path) -> Result<BookDocument> {
     let language = metadata_text(&opf_doc, "language");
     let publisher = metadata_text(&opf_doc, "publisher");
 
-    let base = Path::new(&rootfile)
-        .parent()
-        .map(Path::to_path_buf)
-        .unwrap_or_default();
-
-    let mut manifest = std::collections::HashMap::new();
+    let mut manifest = HashMap::new();
     for item in opf_doc
         .descendants()
         .filter(|node| node.tag_name().name() == "item")
     {
         if let (Some(id), Some(href)) = (item.attribute("id"), item.attribute("href")) {
-            manifest.insert(id.to_string(), normalize_zip_path(base.join(href)));
+            let Some((item_path, _)) = resolve_archive_href(&rootfile, href) else {
+                continue;
+            };
+            manifest.insert(
+                id.to_string(),
+                ManifestItem {
+                    path: item_path,
+                    media_type: item.attribute("media-type").unwrap_or_default().to_string(),
+                    properties: item
+                        .attribute("properties")
+                        .unwrap_or_default()
+                        .split_whitespace()
+                        .map(str::to_string)
+                        .collect(),
+                },
+            );
         }
     }
 
     let mut sections = Vec::new();
+    let mut spine_targets = HashMap::new();
     for itemref in opf_doc
         .descendants()
         .filter(|node| node.tag_name().name() == "itemref")
@@ -294,16 +381,27 @@ pub fn load_epub(path: &Path) -> Result<BookDocument> {
         let Some(idref) = itemref.attribute("idref") else {
             continue;
         };
-        let Some(chapter_path) = manifest.get(idref) else {
+        let Some(chapter) = manifest.get(idref) else {
             continue;
         };
-        let html = read_zip_string(&mut archive, chapter_path)
-            .with_context(|| format!("Failed to read EPUB chapter {chapter_path}"))?;
-        let text = html_to_text(&html);
-        if !text.trim().is_empty() {
+        let html = read_zip_string(&mut archive, &chapter.path)
+            .with_context(|| format!("Failed to read EPUB chapter {}", chapter.path))?;
+        let extracted = extract_xhtml(&html);
+        if !extracted.text.trim().is_empty() {
             let title = chapter_title_from_html(&html)
                 .unwrap_or_else(|| format!("Chapter {}", sections.len() + 1));
-            sections.push(Section { title, text });
+            let section_index = sections.len();
+            sections.push(Section {
+                title,
+                text: extracted.text,
+            });
+            spine_targets.insert(
+                chapter.path.clone(),
+                EpubSpineTarget {
+                    section_index,
+                    anchors: extracted.anchors,
+                },
+            );
         }
     }
 
@@ -314,6 +412,13 @@ pub fn load_epub(path: &Path) -> Result<BookDocument> {
     let stable_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
     let id = stable_book_id(&stable_path, &title);
     let section_count = sections.len();
+    let document_contents =
+        load_epub_document_contents(&mut archive, &opf_doc, &manifest, &spine_targets);
+    let (contents, contents_source) = if document_contents.is_empty() {
+        (generated_contents(&sections), ContentsSource::Generated)
+    } else {
+        (document_contents, ContentsSource::Document)
+    };
     Ok(BookDocument {
         id,
         title: title.clone(),
@@ -329,7 +434,350 @@ pub fn load_epub(path: &Path) -> Result<BookDocument> {
             section_count,
         },
         sections,
+        contents,
+        contents_source,
     })
+}
+
+pub fn load_pdf(path: &Path) -> Result<BookDocument> {
+    let pdf_metadata = pdf_extract::Document::load_metadata(path)
+        .with_context(|| format!("Failed to read PDF metadata from {}", path.display()))?;
+    let page_texts = pdf_extract::extract_text_by_pages(path)
+        .with_context(|| format!("Failed to extract text from PDF {}", path.display()))?;
+
+    if page_texts.is_empty() || page_texts.iter().all(|text| text.trim().is_empty()) {
+        bail!(
+            "PDF contains no extractable text: {}. Scanned or image-only PDFs require OCR, which is not supported.",
+            path.display()
+        );
+    }
+
+    let title = optional_inline_text(pdf_metadata.title).unwrap_or_else(|| fallback_title(path));
+    let author = optional_inline_text(pdf_metadata.author);
+    let sections = page_texts
+        .into_iter()
+        .enumerate()
+        .map(|(index, text)| Section {
+            title: format!("Page {}", index + 1),
+            text: normalize_pdf_text(&text),
+        })
+        .collect::<Vec<_>>();
+    let stable_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
+    let id = stable_book_id(&stable_path, &title);
+    let section_count = sections.len();
+    let document_contents = pdf_extract::Document::load(path)
+        .ok()
+        .and_then(|document| {
+            std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| document.get_toc()))
+                .ok()
+                .and_then(|result| result.ok())
+        })
+        .map(|toc| {
+            toc.toc
+                .into_iter()
+                .filter_map(|entry| {
+                    let title = clean_inline_text(&entry.title);
+                    (!title.is_empty() && (1..=section_count).contains(&entry.page)).then(|| {
+                        ContentsEntry {
+                            title,
+                            depth: entry.level.saturating_sub(1),
+                            target: TextPosition::new(entry.page - 1, 0),
+                        }
+                    })
+                })
+                .collect::<Vec<_>>()
+        })
+        .unwrap_or_default();
+    let (contents, contents_source) = if document_contents.is_empty() {
+        (generated_contents(&sections), ContentsSource::Generated)
+    } else {
+        (document_contents, ContentsSource::Document)
+    };
+
+    Ok(BookDocument {
+        id,
+        title: title.clone(),
+        path: stable_path.clone(),
+        format: BookFormat::Pdf,
+        metadata: BookMetadata {
+            title,
+            author,
+            language: None,
+            publisher: None,
+            format: BookFormat::Pdf,
+            path: stable_path,
+            section_count,
+        },
+        sections,
+        contents,
+        contents_source,
+    })
+}
+
+pub(crate) fn generated_contents(sections: &[Section]) -> Vec<ContentsEntry> {
+    sections
+        .iter()
+        .enumerate()
+        .map(|(section_index, section)| ContentsEntry {
+            title: section.title.clone(),
+            depth: 0,
+            target: TextPosition::new(section_index, 0),
+        })
+        .collect()
+}
+
+fn load_epub_document_contents<R: Read + Seek>(
+    archive: &mut ZipArchive<R>,
+    opf_doc: &Document<'_>,
+    manifest: &HashMap<String, ManifestItem>,
+    spine_targets: &HashMap<String, EpubSpineTarget>,
+) -> Vec<ContentsEntry> {
+    if let Some(nav_item) = manifest
+        .values()
+        .find(|item| item.properties.iter().any(|property| property == "nav"))
+    {
+        if let Ok(nav) = read_zip_string(archive, &nav_item.path) {
+            let contents =
+                resolve_epub_contents(parse_epub3_nav(&nav), &nav_item.path, spine_targets);
+            if !contents.is_empty() {
+                return contents;
+            }
+        }
+    }
+
+    let ncx_id = opf_doc
+        .descendants()
+        .find(|node| node.tag_name().name() == "spine")
+        .and_then(|node| node.attribute("toc"));
+    let ncx_item = ncx_id.and_then(|id| manifest.get(id)).or_else(|| {
+        manifest
+            .values()
+            .find(|item| item.media_type == "application/x-dtbncx+xml")
+    });
+    if let Some(ncx_item) = ncx_item {
+        if let Ok(ncx) = read_zip_string(archive, &ncx_item.path) {
+            let contents =
+                resolve_epub_contents(parse_epub2_ncx(&ncx), &ncx_item.path, spine_targets);
+            if !contents.is_empty() {
+                return contents;
+            }
+        }
+    }
+    Vec::new()
+}
+
+fn parse_epub3_nav(xml: &str) -> Vec<RawContentsEntry> {
+    let Ok(document) = Document::parse(xml) else {
+        return Vec::new();
+    };
+    let Some(nav) = document.descendants().find(|node| {
+        node.is_element()
+            && node.tag_name().name() == "nav"
+            && node.attributes().any(|attribute| {
+                (attribute.name() == "type"
+                    && attribute
+                        .value()
+                        .split_whitespace()
+                        .any(|value| value == "toc"))
+                    || (attribute.name() == "role"
+                        && attribute
+                            .value()
+                            .split_whitespace()
+                            .any(|value| value == "doc-toc"))
+            })
+    }) else {
+        return Vec::new();
+    };
+    let Some(list) = nav
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "ol")
+    else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    collect_epub3_nav_entries(list, 0, &mut entries);
+    entries
+}
+
+fn collect_epub3_nav_entries(
+    list: roxmltree::Node<'_, '_>,
+    depth: usize,
+    entries: &mut Vec<RawContentsEntry>,
+) {
+    for item in list
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "li")
+    {
+        if let Some(link) = item
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "a")
+        {
+            if let Some(href) = link.attribute("href") {
+                let title = node_inline_text(link);
+                if !title.is_empty() {
+                    entries.push(RawContentsEntry {
+                        title,
+                        depth,
+                        href: href.to_string(),
+                    });
+                }
+            }
+        }
+        if let Some(child_list) = item
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "ol")
+        {
+            collect_epub3_nav_entries(child_list, depth + 1, entries);
+        }
+    }
+}
+
+fn parse_epub2_ncx(xml: &str) -> Vec<RawContentsEntry> {
+    let Ok(document) = Document::parse(xml) else {
+        return Vec::new();
+    };
+    let Some(nav_map) = document
+        .descendants()
+        .find(|node| node.is_element() && node.tag_name().name() == "navMap")
+    else {
+        return Vec::new();
+    };
+    let mut entries = Vec::new();
+    collect_epub2_nav_entries(nav_map, 0, &mut entries);
+    entries
+}
+
+fn collect_epub2_nav_entries(
+    parent: roxmltree::Node<'_, '_>,
+    depth: usize,
+    entries: &mut Vec<RawContentsEntry>,
+) {
+    for nav_point in parent
+        .children()
+        .filter(|node| node.is_element() && node.tag_name().name() == "navPoint")
+    {
+        let title = nav_point
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "navLabel")
+            .map(node_inline_text)
+            .unwrap_or_default();
+        let href = nav_point
+            .children()
+            .find(|node| node.is_element() && node.tag_name().name() == "content")
+            .and_then(|node| node.attribute("src"));
+        if let Some(href) = href {
+            if !title.is_empty() {
+                entries.push(RawContentsEntry {
+                    title,
+                    depth,
+                    href: href.to_string(),
+                });
+            }
+        }
+        collect_epub2_nav_entries(nav_point, depth + 1, entries);
+    }
+}
+
+fn node_inline_text(node: roxmltree::Node<'_, '_>) -> String {
+    clean_inline_text(
+        &node
+            .descendants()
+            .filter(|descendant| descendant.is_text())
+            .filter_map(|descendant| descendant.text())
+            .collect::<Vec<_>>()
+            .join(" "),
+    )
+}
+
+fn resolve_epub_contents(
+    raw_entries: Vec<RawContentsEntry>,
+    contents_path: &str,
+    spine_targets: &HashMap<String, EpubSpineTarget>,
+) -> Vec<ContentsEntry> {
+    let mut entries = raw_entries
+        .into_iter()
+        .filter_map(|entry| {
+            let (target_path, fragment) = resolve_archive_href(contents_path, &entry.href)?;
+            let spine_target = spine_targets.get(&target_path)?;
+            let char_offset = match fragment {
+                Some(fragment) => *spine_target.anchors.get(&fragment)?,
+                None => 0,
+            };
+            Some(ContentsEntry {
+                title: entry.title,
+                depth: entry.depth,
+                target: TextPosition::new(spine_target.section_index, char_offset),
+            })
+        })
+        .collect::<Vec<_>>();
+    normalize_contents_depths(&mut entries);
+    entries
+}
+
+fn normalize_contents_depths(entries: &mut [ContentsEntry]) {
+    let Some(first_depth) = entries.first().map(|entry| entry.depth) else {
+        return;
+    };
+    let mut previous_depth = 0;
+    for (index, entry) in entries.iter_mut().enumerate() {
+        let depth = entry.depth.saturating_sub(first_depth);
+        entry.depth = if index == 0 {
+            0
+        } else {
+            depth.min(previous_depth + 1)
+        };
+        previous_depth = entry.depth;
+    }
+}
+
+fn resolve_archive_href(base_document: &str, href: &str) -> Option<(String, Option<String>)> {
+    let (path_and_query, fragment) = href
+        .split_once('#')
+        .map_or((href, None), |(path, fragment)| (path, Some(fragment)));
+    let encoded_path = path_and_query
+        .split_once('?')
+        .map_or(path_and_query, |(path, _)| path);
+    if encoded_path.contains("://") || encoded_path.contains(':') {
+        return None;
+    }
+    let decoded_path = percent_decode_str(encoded_path)
+        .decode_utf8_lossy()
+        .replace('\\', "/");
+    if decoded_path.contains("://") || decoded_path.contains(':') {
+        return None;
+    }
+    let mut components = Vec::new();
+    if !decoded_path.starts_with('/') {
+        if let Some((base, _)) = base_document.rsplit_once('/') {
+            components.extend(base.split('/').filter(|part| !part.is_empty()));
+        }
+    }
+    if decoded_path.is_empty() {
+        components.clear();
+        components.extend(base_document.split('/').filter(|part| !part.is_empty()));
+    } else {
+        for component in decoded_path.split('/') {
+            match component {
+                "" | "." => {}
+                ".." => {
+                    components.pop()?;
+                }
+                component => components.push(component),
+            }
+        }
+    }
+    let path = components.join("/");
+    if path.is_empty() {
+        return None;
+    }
+    let fragment = fragment
+        .map(|fragment| {
+            percent_decode_str(fragment)
+                .decode_utf8_lossy()
+                .into_owned()
+        })
+        .filter(|fragment| !fragment.is_empty());
+    Some((path, fragment))
 }
 
 fn metadata_text(document: &Document<'_>, tag: &str) -> Option<String> {
@@ -435,16 +883,6 @@ fn stable_book_id(path: &Path, title: &str) -> String {
     format!("{:x}", hash)[..12].to_string()
 }
 
-fn normalize_zip_path(path: PathBuf) -> String {
-    path.components()
-        .filter_map(|component| match component {
-            std::path::Component::Normal(value) => value.to_str(),
-            _ => None,
-        })
-        .collect::<Vec<_>>()
-        .join("/")
-}
-
 fn chapter_title_from_html(html: &str) -> Option<String> {
     let document = Document::parse(html).ok()?;
     document
@@ -455,40 +893,213 @@ fn chapter_title_from_html(html: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn html_to_text(html: &str) -> String {
-    let mut out = String::with_capacity(html.len());
+fn extract_xhtml(html: &str) -> ExtractedXhtml {
+    let mut raw = Vec::with_capacity(html.chars().count());
     let mut in_tag = false;
     let mut entity = String::new();
     let mut in_entity = false;
+    let mut entity_source = 0;
 
-    for ch in html.chars() {
+    for (source, ch) in html.char_indices() {
         match ch {
             '<' => {
                 in_tag = true;
-                if !out.ends_with('\n') {
-                    out.push('\n');
+                if raw.last().is_none_or(|(ch, _)| *ch != '\n') {
+                    raw.push(('\n', source));
                 }
             }
             '>' => in_tag = false,
             '&' if !in_tag => {
                 in_entity = true;
                 entity.clear();
+                entity_source = source;
             }
             ';' if in_entity => {
                 in_entity = false;
-                out.push_str(decode_entity(&entity));
+                raw.extend(decode_entity(&entity).chars().map(|ch| (ch, entity_source)));
             }
             _ if in_tag => {}
             _ if in_entity => entity.push(ch),
-            _ => out.push(ch),
+            _ => raw.push((ch, source)),
         }
     }
 
-    out.lines()
-        .map(clean_inline_text)
-        .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+    let (text, source_map) = normalize_raw_xhtml_text(&raw);
+    let mut anchors = HashMap::new();
+    for (id, source) in html_anchor_sources(html) {
+        let char_offset = source_map
+            .iter()
+            .position(|mapped_source| {
+                mapped_source.is_some_and(|mapped_source| mapped_source >= source)
+            })
+            .unwrap_or(source_map.len());
+        anchors.entry(id).or_insert(char_offset);
+    }
+
+    ExtractedXhtml { text, anchors }
+}
+
+fn html_anchor_sources(html: &str) -> Vec<(String, usize)> {
+    let mut anchors = Vec::new();
+    let mut search_start = 0;
+    while search_start < html.len() {
+        let Some(relative_start) = html[search_start..].find('<') else {
+            break;
+        };
+        let tag_start = search_start + relative_start;
+        let mut quote = None;
+        let mut tag_end = None;
+        for (relative, ch) in html[tag_start + 1..].char_indices() {
+            match (quote, ch) {
+                (Some(active), ch) if active == ch => quote = None,
+                (None, '\'' | '"') => quote = Some(ch),
+                (None, '>') => {
+                    tag_end = Some(tag_start + 1 + relative);
+                    break;
+                }
+                _ => {}
+            }
+        }
+        let Some(tag_end) = tag_end else {
+            break;
+        };
+        if let Some(id) = tag_id_attribute(&html[tag_start + 1..tag_end]) {
+            anchors.push((id, tag_start));
+        }
+        search_start = tag_end + 1;
+    }
+    anchors
+}
+
+fn tag_id_attribute(tag: &str) -> Option<String> {
+    let tag = tag.trim_start();
+    if tag.starts_with('/') || tag.starts_with('!') || tag.starts_with('?') {
+        return None;
+    }
+    let bytes = tag.as_bytes();
+    let mut index = 0;
+    while index < bytes.len() && !bytes[index].is_ascii_whitespace() {
+        index += 1;
+    }
+    while index < bytes.len() {
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index == bytes.len() || matches!(bytes[index], b'/' | b'>') {
+            break;
+        }
+        let name_start = index;
+        while index < bytes.len()
+            && !bytes[index].is_ascii_whitespace()
+            && !matches!(bytes[index], b'=' | b'/' | b'>')
+        {
+            index += 1;
+        }
+        let name = &tag[name_start..index];
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index == bytes.len() || bytes[index] != b'=' {
+            continue;
+        }
+        index += 1;
+        while index < bytes.len() && bytes[index].is_ascii_whitespace() {
+            index += 1;
+        }
+        if index == bytes.len() {
+            break;
+        }
+        let (value_start, value_end) = if matches!(bytes[index], b'\'' | b'"') {
+            let quote = bytes[index];
+            index += 1;
+            let value_start = index;
+            while index < bytes.len() && bytes[index] != quote {
+                index += 1;
+            }
+            let value_end = index;
+            index = index.saturating_add(1);
+            (value_start, value_end)
+        } else {
+            let value_start = index;
+            while index < bytes.len()
+                && !bytes[index].is_ascii_whitespace()
+                && !matches!(bytes[index], b'/' | b'>')
+            {
+                index += 1;
+            }
+            (value_start, index)
+        };
+        if name.eq_ignore_ascii_case("id") || name.eq_ignore_ascii_case("xml:id") {
+            return Some(decode_attribute_entities(&tag[value_start..value_end]));
+        }
+    }
+    None
+}
+
+fn decode_attribute_entities(value: &str) -> String {
+    value
+        .replace("&amp;", "&")
+        .replace("&quot;", "\"")
+        .replace("&apos;", "'")
+        .replace("&lt;", "<")
+        .replace("&gt;", ">")
+}
+
+fn normalize_raw_xhtml_text(raw: &[(char, usize)]) -> (String, Vec<Option<usize>>) {
+    let mut text = String::new();
+    let mut source_map = Vec::new();
+    let mut line = Vec::new();
+
+    for &(ch, source) in raw {
+        if ch == '\n' {
+            append_clean_xhtml_line(&line, &mut text, &mut source_map);
+            line.clear();
+        } else {
+            line.push((ch, source));
+        }
+    }
+    append_clean_xhtml_line(&line, &mut text, &mut source_map);
+    (text, source_map)
+}
+
+fn append_clean_xhtml_line(
+    line: &[(char, usize)],
+    text: &mut String,
+    source_map: &mut Vec<Option<usize>>,
+) {
+    let mut words = Vec::<Vec<(char, usize)>>::new();
+    let mut index = 0;
+    while index < line.len() {
+        while index < line.len() && line[index].0.is_whitespace() {
+            index += 1;
+        }
+        if index == line.len() {
+            break;
+        }
+        let mut word = Vec::new();
+        while index < line.len() && !line[index].0.is_whitespace() {
+            word.push(line[index]);
+            index += 1;
+        }
+        words.push(word);
+    }
+    if words.is_empty() {
+        return;
+    }
+    if !text.is_empty() {
+        text.push('\n');
+        source_map.push(None);
+    }
+    for (word_index, word) in words.iter().enumerate() {
+        if word_index > 0 {
+            text.push(' ');
+            source_map.push(None);
+        }
+        for &(ch, source) in word {
+            text.push(ch);
+            source_map.push(Some(source));
+        }
+    }
 }
 
 fn decode_entity(entity: &str) -> &str {
@@ -505,6 +1116,19 @@ fn decode_entity(entity: &str) -> &str {
 
 fn clean_inline_text(text: &str) -> String {
     text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn optional_inline_text(value: Option<String>) -> Option<String> {
+    value
+        .map(|value| clean_inline_text(&value))
+        .filter(|value| !value.is_empty())
+}
+
+fn normalize_pdf_text(text: &str) -> String {
+    text.replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .trim()
+        .to_string()
 }
 
 fn preview(text: &str, byte_offset: usize) -> String {
@@ -561,6 +1185,8 @@ mod tests {
                 title: "A".into(),
                 text: "Hello Rust reader".into(),
             }],
+            contents: Vec::new(),
+            contents_source: ContentsSource::Generated,
         };
         let results = document.search("rust");
         assert_eq!(results.len(), 1);
@@ -587,6 +1213,8 @@ mod tests {
                 title: "A".into(),
                 text: "İX".into(),
             }],
+            contents: Vec::new(),
+            contents_source: ContentsSource::Generated,
         };
 
         assert_eq!(document.search("x")[0].position, TextPosition::new(0, 1));
@@ -604,7 +1232,18 @@ mod tests {
 
     #[test]
     fn strips_basic_html() {
-        assert_eq!(html_to_text("<h1>Hi</h1><p>A &amp; B</p>"), "Hi\nA & B");
+        assert_eq!(
+            extract_xhtml("<h1>Hi</h1><p>A &amp; B</p>").text,
+            "Hi\nA & B"
+        );
+    }
+
+    #[test]
+    fn tolerant_anchor_scanner_maps_empty_anchor_to_following_text() {
+        let extracted = extract_xhtml("<p>Alpha</p><a xml:id='next'></a><h2>Next &unknown;</h2>");
+
+        assert_eq!(extracted.text, "Alpha\nNext");
+        assert_eq!(extracted.anchors.get("next"), Some(&6));
     }
 
     #[test]
@@ -626,7 +1265,7 @@ mod tests {
 
     #[test]
     fn load_book_rejects_unsupported_formats() {
-        let err = load_book(Path::new("book.pdf")).unwrap_err();
+        let err = load_book(Path::new("book.mobi")).unwrap_err();
         assert!(err.to_string().contains("Unsupported book format"));
     }
 
@@ -650,6 +1289,8 @@ mod tests {
                 title: "A".into(),
                 text: "Hello Rust reader".into(),
             }],
+            contents: Vec::new(),
+            contents_source: ContentsSource::Generated,
         };
 
         assert!(document.search("   ").is_empty());

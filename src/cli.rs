@@ -6,7 +6,7 @@ use clap::{Parser, Subcommand};
 #[command(
     name = "reader",
     version,
-    about = "Read EPUB and TXT books in your terminal",
+    about = "Read EPUB, TXT, and text-based PDF books in your terminal",
     subcommand_precedence_over_arg = true
 )]
 pub struct Cli {
@@ -45,6 +45,12 @@ pub enum Command {
     Search {
         book: String,
         query: String,
+    },
+    /// Reconcile the managed bookshelf. This is the short form of
+    /// `reader shelf refresh`.
+    Refresh {
+        #[arg(value_name = "DIR")]
+        dir: Option<PathBuf>,
     },
     Shelf {
         #[command(subcommand)]
@@ -137,6 +143,17 @@ mod tests {
             cli.command,
             Some(Command::Shelf { command: None })
         ));
+    }
+
+    #[test]
+    fn parses_top_level_refresh_directory() {
+        let cli = Cli::parse_from(["reader", "refresh", ".\\Liberal"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Refresh { dir: Some(ref dir) })
+                if dir == &PathBuf::from(".\\Liberal")
+        ));
+        assert!(cli.file.is_empty());
     }
 
     #[test]

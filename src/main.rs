@@ -10,6 +10,7 @@ use reader::config::ReaderConfig;
 use reader::shelf::{run_shelf, ShelfOutcome};
 use reader::storage::{LibraryBook, Store};
 use reader::tui::run_reader;
+use unicode_width::UnicodeWidthStr;
 
 fn main() -> ExitCode {
     match run() {
@@ -39,6 +40,9 @@ fn run() -> Result<()> {
         Some(Command::List) => {
             print_library_table(&store);
         }
+        Some(Command::Refresh { dir }) => {
+            refresh_bookshelf(&mut store, &mut config, dir)?;
+        }
         Some(Command::Shelf { command }) => match command {
             None => loop {
                 match run_shelf(&mut store, &mut config, None)? {
@@ -47,23 +51,7 @@ fn run() -> Result<()> {
                 }
             },
             Some(ShelfCommand::Refresh { dir }) => {
-                let supplied_dir = dir.is_some();
-                let dir = match dir {
-                    Some(dir) => resolve_bookshelf_dir(&dir)?,
-                    None => config.bookshelf_dir.clone().ok_or_else(|| {
-                        anyhow::anyhow!(
-                            "bookshelf_dir is not configured. Pass it once with \
-                             `reader shelf refresh <DIR>`."
-                        )
-                    })?,
-                };
-                let report = bookshelf::refresh(&mut store, &dir)?;
-                store.save()?;
-                if supplied_dir {
-                    config.bookshelf_dir = Some(dir);
-                    config.save()?;
-                }
-                print_refresh_report(&report);
+                refresh_bookshelf(&mut store, &mut config, dir)?;
             }
         },
         Some(Command::Open { book }) => {
@@ -94,8 +82,9 @@ fn run() -> Result<()> {
                 store.save()?;
                 sync_sidecar_if_configured(&store, &config, &entry.id)?;
                 println!(
-                    "Bookmark added: {} at chapter {} · {}",
+                    "Bookmark added: {} at {} {} · {}",
                     bookmark.id,
+                    entry.format.section_label().to_ascii_lowercase(),
                     bookmark.position.section_index + 1,
                     format_progress_tenths(
                         entry.content_metrics.progress_tenths(bookmark.position)
@@ -106,8 +95,9 @@ fn run() -> Result<()> {
                 let entry = store.resolve_book(&book)?;
                 for bookmark in store.bookmarks_for(&entry.id) {
                     println!(
-                        "{}  chapter {}  {}  {}",
+                        "{}  {} {}  {}  {}",
                         bookmark.id,
+                        entry.format.section_label().to_ascii_lowercase(),
                         bookmark.position.section_index + 1,
                         format_progress_tenths(
                             entry.content_metrics.progress_tenths(bookmark.position)
@@ -145,7 +135,8 @@ fn run() -> Result<()> {
             let metrics = document.content_metrics();
             for result in results.into_iter().take(25) {
                 println!(
-                    "chapter {}  {}  {}",
+                    "{} {}  {}  {}",
+                    document.format.section_label().to_ascii_lowercase(),
                     result.position.section_index + 1,
                     format_progress_tenths(metrics.progress_tenths(result.position)),
                     result.preview
@@ -169,6 +160,31 @@ fn run() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn refresh_bookshelf(
+    store: &mut Store,
+    config: &mut ReaderConfig,
+    dir: Option<PathBuf>,
+) -> Result<()> {
+    let supplied_dir = dir.is_some();
+    let dir = match dir {
+        Some(dir) => resolve_bookshelf_dir(&dir)?,
+        None => config.bookshelf_dir.clone().ok_or_else(|| {
+            anyhow::anyhow!(
+                "bookshelf_dir is not configured. Pass it once with \
+                 `reader refresh <DIR>` (or `reader shelf refresh <DIR>`)."
+            )
+        })?,
+    };
+    let report = bookshelf::refresh(store, &dir)?;
+    store.save()?;
+    if supplied_dir {
+        config.bookshelf_dir = Some(dir);
+        config.save()?;
+    }
+    print_refresh_report(&report);
     Ok(())
 }
 
@@ -207,7 +223,7 @@ fn user_facing_path(path: PathBuf) -> PathBuf {
 }
 
 fn open_book_in_reader(
-    entry: reader::storage::LibraryBook,
+    mut entry: reader::storage::LibraryBook,
     store: &mut Store,
     config: &mut ReaderConfig,
 ) -> Result<()> {
@@ -216,6 +232,15 @@ fn open_book_in_reader(
             "Book file is missing: {}. Put the file back under bookshelf_dir and run `reader shelf refresh`.",
             entry.path.display()
         );
+    }
+    if config
+        .bookshelf_dir
+        .as_deref()
+        .is_some_and(|directory| !path_is_in_dir(&entry.path, directory))
+    {
+        let source = entry.path.clone();
+        entry = import_book(store, config, &source)?;
+        store.save()?;
     }
     let document = load_book(&entry.path)?;
     let book_id = entry.id.clone();
@@ -226,7 +251,13 @@ fn open_book_in_reader(
 
 fn import_book(store: &mut Store, config: &ReaderConfig, source: &Path) -> Result<LibraryBook> {
     if let Some(existing) = store.book_by_path(source) {
-        return Ok(existing.clone());
+        if config
+            .bookshelf_dir
+            .as_deref()
+            .is_none_or(|directory| path_is_in_dir(&existing.path, directory))
+        {
+            return Ok(existing.clone());
+        }
     }
 
     let stored = match config.bookshelf_dir.as_deref() {
@@ -256,8 +287,14 @@ fn choose_bookshelf_path(store: &Store, source: &Path, bookshelf_dir: &Path) -> 
 }
 
 fn sync_sidecar_if_configured(store: &Store, config: &ReaderConfig, book_id: &str) -> Result<()> {
-    if config.bookshelf_dir.is_some() {
-        bookshelf::sync_sidecar_for_book(store, book_id)?;
+    if let Some(directory) = config.bookshelf_dir.as_deref() {
+        if store
+            .book_by_id(book_id)
+            .is_some_and(|book| !path_is_in_dir(&book.path, directory))
+        {
+            return Ok(());
+        }
+        bookshelf::sync_sidecar_for_book(store, book_id, directory)?;
     }
     Ok(())
 }
@@ -303,12 +340,12 @@ fn format_library_row(book: &LibraryBook, last_book_id: Option<&str>) -> String 
     } else {
         " "
     };
-    let title = truncate_str(&book.title, 30);
+    let title = fit_column(&book.title, 30);
     let author = book
         .author
         .as_deref()
-        .map(|value| truncate_str(value, 16))
-        .unwrap_or_else(|| "-".to_string());
+        .map(|value| fit_column(value, 16))
+        .unwrap_or_else(|| fit_column("-", 16));
     let percent = format!("{}%", progress_percent(book));
     let last = book
         .last_opened
@@ -319,13 +356,10 @@ fn format_library_row(book: &LibraryBook, last_book_id: Option<&str>) -> String 
     } else {
         book.bookmarks.len().to_string()
     };
-    let format = match book.format {
-        reader::book::BookFormat::Epub => "EPUB",
-        reader::book::BookFormat::Txt => "TXT",
-    };
+    let format = book.format.label();
     let status = if book.missing { "missing" } else { "ok" };
     format!(
-        "{:<2} {:<30}  {:<16}  {:>4}  {:<10}  {:>4}  {:<5}  {:<7}",
+        "{:<2} {}  {}  {:>4}  {:<10}  {:>4}  {:<5}  {:<7}",
         marker, title, author, percent, last, bookmarks, format, status
     )
 }
@@ -356,18 +390,35 @@ fn print_refresh_report(report: &bookshelf::RefreshReport) {
 }
 
 fn truncate_str(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
+    if text.width() <= max {
         text.to_string()
-    } else if max <= 1 {
+    } else if max == 0 {
+        String::new()
+    } else if max == 1 {
         "\u{2026}".to_string()
     } else {
-        let mut out: String = text.chars().take(max - 1).collect();
+        let mut out = String::new();
+        for ch in text.chars() {
+            let mut candidate = out.clone();
+            candidate.push(ch);
+            candidate.push('\u{2026}');
+            if candidate.width() > max {
+                break;
+            }
+            out.push(ch);
+        }
         out.push('\u{2026}');
         out
     }
 }
 
-// Privacy mode only affects what the TUI renders. CLI errors and panics
+fn fit_column(text: &str, width: usize) -> String {
+    let mut fitted = truncate_str(text, width);
+    fitted.push_str(&" ".repeat(width.saturating_sub(fitted.width())));
+    fitted
+}
+
+// Discreet mode only affects what the TUI renders. CLI errors and panics
 // are always printed in full so the user can debug regardless of mode.
 fn render_error(err: &anyhow::Error) -> String {
     format!("Error: {err:?}")
@@ -502,16 +553,16 @@ mod tests {
 
     #[test]
     fn error_output_always_keeps_real_error_details() {
-        // Privacy mode used to swap real errors for a fake JS stack; that
+        // Discreet mode used to swap real errors for a fake JS stack; that
         // suppressed useful diagnostics. The new contract is: render_error
-        // always returns the real error, regardless of any privacy setting.
+        // always returns the real error, regardless of any discreet setting.
         let err = anyhow::anyhow!("Book not found: secret-title");
 
         let output = render_error(&err);
 
         assert!(output.contains("Book not found: secret-title"));
         assert!(!output.contains("Uncaught TypeError"));
-        assert!(!output.contains("PrivacyOverlay.render"));
+        assert!(!output.contains("DiscreetOverlay.render"));
     }
 
     #[test]
@@ -646,5 +697,27 @@ mod tests {
             .filter_map(|e| e.ok())
             .collect();
         assert_eq!(entries.len(), 1);
+    }
+
+    #[test]
+    fn existing_external_record_is_copied_after_bookshelf_is_configured() {
+        let dir = tempfile::tempdir().unwrap();
+        let external = dir.path().join("external.txt");
+        let shelf = dir.path().join("shelf");
+        std::fs::write(&external, b"managed copy").unwrap();
+        std::fs::create_dir(&shelf).unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        let initial = import_book(&mut store, &ReaderConfig::default(), &external).unwrap();
+        assert_eq!(initial.path, external.canonicalize().unwrap());
+        let mut config = ReaderConfig::default();
+        config.bookshelf_dir = Some(shelf.clone());
+
+        let managed = import_book(&mut store, &config, &external).unwrap();
+        sync_sidecar_if_configured(&store, &config, &managed.id).unwrap();
+
+        assert!(path_is_in_dir(&managed.path, &shelf));
+        assert!(managed.path.exists());
+        assert!(reader::bookshelf::sidecar_path(&managed.path).exists());
+        assert!(!reader::bookshelf::sidecar_path(&external).exists());
     }
 }

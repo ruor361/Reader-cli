@@ -2,14 +2,10 @@ use std::path::PathBuf;
 
 use anyhow::{Context, Result};
 
-use crate::ui::Theme;
-
-#[derive(Debug, Clone, serde::Serialize, serde::Deserialize)]
-#[serde(default)]
+#[derive(Debug, Clone, serde::Serialize)]
 pub struct ReaderConfig {
-    pub theme: Theme,
     pub show_progress: bool,
-    pub privacy_mode: bool,
+    pub discreet_mode: bool,
     pub mouse_support: bool,
     pub text_width: Option<u16>,
     pub library_dirs: Vec<PathBuf>,
@@ -25,9 +21,8 @@ pub struct ReaderConfig {
 impl Default for ReaderConfig {
     fn default() -> Self {
         Self {
-            theme: Theme::Dark,
             show_progress: true,
-            privacy_mode: false,
+            discreet_mode: false,
             mouse_support: false,
             text_width: None,
             library_dirs: Vec::new(),
@@ -76,11 +71,9 @@ impl ReaderConfig {
         let Some(path) = self.path.as_ref() else {
             return Ok(());
         };
-        if let Some(parent) = path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let text = serde_json::to_string_pretty(self)?;
-        std::fs::write(path, text)?;
+        crate::atomic_file::write(path, text.as_bytes())
+            .with_context(|| format!("Failed to save {}", path.display()))?;
         Ok(())
     }
 
@@ -88,12 +81,53 @@ impl ReaderConfig {
         self.show_progress = !self.show_progress;
     }
 
-    pub fn toggle_privacy_mode(&mut self) {
-        self.privacy_mode = !self.privacy_mode;
+    pub fn toggle_discreet_mode(&mut self) {
+        self.discreet_mode = !self.discreet_mode;
     }
+}
 
-    pub fn toggle_theme(&mut self) {
-        self.theme = self.theme.toggled();
+#[derive(serde::Deserialize)]
+#[serde(default)]
+struct ReaderConfigWire {
+    show_progress: bool,
+    discreet_mode: Option<bool>,
+    privacy_mode: Option<bool>,
+    mouse_support: bool,
+    text_width: Option<u16>,
+    library_dirs: Vec<PathBuf>,
+    bookshelf_dir: Option<PathBuf>,
+}
+
+impl Default for ReaderConfigWire {
+    fn default() -> Self {
+        let config = ReaderConfig::default();
+        Self {
+            show_progress: config.show_progress,
+            discreet_mode: None,
+            privacy_mode: None,
+            mouse_support: config.mouse_support,
+            text_width: config.text_width,
+            library_dirs: config.library_dirs,
+            bookshelf_dir: config.bookshelf_dir,
+        }
+    }
+}
+
+impl<'de> serde::Deserialize<'de> for ReaderConfig {
+    fn deserialize<D>(deserializer: D) -> Result<Self, D::Error>
+    where
+        D: serde::Deserializer<'de>,
+    {
+        let wire = ReaderConfigWire::deserialize(deserializer)?;
+        Ok(Self {
+            show_progress: wire.show_progress,
+            discreet_mode: wire.discreet_mode.or(wire.privacy_mode).unwrap_or(false),
+            mouse_support: wire.mouse_support,
+            text_width: wire.text_width,
+            library_dirs: wire.library_dirs,
+            bookshelf_dir: wire.bookshelf_dir,
+            path: None,
+        })
     }
 }
 
@@ -106,20 +140,18 @@ mod tests {
         let config = ReaderConfig::default();
 
         assert!(config.show_progress);
-        assert_eq!(config.theme, Theme::Dark);
-        assert!(!config.privacy_mode);
+        assert!(!config.discreet_mode);
         assert!(!config.mouse_support);
         assert_eq!(config.text_width, None);
         assert!(config.bookshelf_dir.is_none());
     }
 
     #[test]
-    fn loads_missing_fields_from_defaults() {
+    fn ignores_the_removed_theme_field_and_loads_missing_fields_from_defaults() {
         let config: ReaderConfig = serde_json::from_str(r#"{"theme":"light"}"#).unwrap();
 
         assert!(config.show_progress);
-        assert_eq!(config.theme, Theme::Light);
-        assert!(!config.privacy_mode);
+        assert!(!config.discreet_mode);
         assert!(!config.mouse_support);
         assert_eq!(config.text_width, None);
     }
@@ -131,14 +163,12 @@ mod tests {
         let mut config = ReaderConfig::open(path.clone()).unwrap();
 
         config.toggle_progress();
-        config.toggle_privacy_mode();
-        config.toggle_theme();
+        config.toggle_discreet_mode();
         config.save().unwrap();
 
         let loaded = ReaderConfig::open(path).unwrap();
         assert!(!loaded.show_progress);
-        assert!(loaded.privacy_mode);
-        assert_eq!(loaded.theme, Theme::Light);
+        assert!(loaded.discreet_mode);
     }
 
     #[test]
@@ -155,9 +185,40 @@ mod tests {
         assert!(backup.exists());
         // Defaults are restored.
         assert!(config.show_progress);
-        assert!(!config.privacy_mode);
+        assert!(!config.discreet_mode);
         // And a subsequent save produces a valid file at the original path.
         config.save().unwrap();
         assert!(path.exists());
+    }
+
+    #[test]
+    fn migrates_legacy_privacy_mode_and_serializes_only_discreet_mode() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configuration.json");
+        std::fs::write(&path, r#"{"privacy_mode":true}"#).unwrap();
+        let config = ReaderConfig::open(path.clone()).unwrap();
+
+        assert!(config.discreet_mode);
+        config.save().unwrap();
+        let serialized = std::fs::read_to_string(path).unwrap();
+        let value: serde_json::Value = serde_json::from_str(&serialized).unwrap();
+        assert_eq!(value["discreet_mode"], true);
+        assert!(value.get("privacy_mode").is_none());
+    }
+
+    #[test]
+    fn discreet_mode_wins_when_both_config_keys_exist() {
+        let config: ReaderConfig =
+            serde_json::from_str(r#"{"privacy_mode":true,"discreet_mode":false}"#).unwrap();
+
+        assert!(!config.discreet_mode);
+    }
+
+    #[test]
+    fn removed_theme_is_not_serialized() {
+        let config: ReaderConfig = serde_json::from_str(r#"{"theme":"dark"}"#).unwrap();
+        let serialized = serde_json::to_value(config).unwrap();
+
+        assert!(serialized.get("theme").is_none());
     }
 }

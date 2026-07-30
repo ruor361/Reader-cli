@@ -5,26 +5,19 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 use unicode_width::UnicodeWidthStr;
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum Theme {
-    #[default]
-    Dark,
-    Light,
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) struct DiscreetLogColors {
+    pub info: Color,
+    pub warning: Color,
+    pub error: Color,
 }
 
-impl Theme {
-    pub const fn toggled(self) -> Self {
-        match self {
-            Self::Dark => Self::Light,
-            Self::Light => Self::Dark,
-        }
-    }
-
-    pub const fn label(self) -> &'static str {
-        match self {
-            Self::Dark => "dark",
-            Self::Light => "light",
+impl DiscreetLogColors {
+    pub(crate) const fn terminal() -> Self {
+        Self {
+            info: Color::Green,
+            warning: Color::Yellow,
+            error: Color::Red,
         }
     }
 }
@@ -35,6 +28,9 @@ pub struct Palette {
     pub body: Color,
     pub muted: Color,
     pub accent: Color,
+    pub discreet_body: Color,
+    pub discreet_muted: Color,
+    pub discreet_auxiliary: Color,
     pub selected_foreground: Color,
     pub selected_background: Color,
     pub border: Color,
@@ -43,35 +39,42 @@ pub struct Palette {
 }
 
 impl Palette {
-    pub const fn for_theme(theme: Theme) -> Self {
-        match theme {
-            Theme::Dark => Self {
-                background: Color::Rgb(15, 17, 21),
-                body: Color::Rgb(242, 244, 248),
-                muted: Color::Rgb(174, 184, 198),
-                accent: Color::Rgb(105, 185, 255),
-                selected_foreground: Color::Rgb(10, 20, 30),
-                selected_background: Color::Rgb(118, 199, 255),
-                border: Color::Rgb(135, 151, 170),
-                error: Color::Rgb(255, 112, 112),
-                success: Color::Rgb(112, 220, 160),
-            },
-            Theme::Light => Self {
-                background: Color::Rgb(250, 250, 247),
-                body: Color::Rgb(25, 29, 35),
-                muted: Color::Rgb(82, 91, 104),
-                accent: Color::Rgb(0, 91, 168),
-                selected_foreground: Color::Rgb(250, 250, 247),
-                selected_background: Color::Rgb(0, 91, 168),
-                border: Color::Rgb(75, 87, 103),
-                error: Color::Rgb(176, 30, 45),
-                success: Color::Rgb(20, 120, 70),
-            },
+    pub const fn terminal() -> Self {
+        Self {
+            background: Color::Reset,
+            body: Color::Reset,
+            muted: Color::DarkGray,
+            accent: Color::Cyan,
+            discreet_body: Color::Reset,
+            discreet_muted: Color::DarkGray,
+            discreet_auxiliary: Color::DarkGray,
+            selected_foreground: Color::Reset,
+            selected_background: Color::Reset,
+            border: Color::DarkGray,
+            error: Color::Red,
+            success: Color::Green,
         }
     }
 
     pub fn base(self) -> Style {
         Style::default().fg(self.body).bg(self.background)
+    }
+
+    pub const fn discreet_mode(self) -> Self {
+        Self {
+            background: self.background,
+            body: self.discreet_body,
+            muted: self.discreet_muted,
+            accent: self.discreet_auxiliary,
+            discreet_body: self.discreet_body,
+            discreet_muted: self.discreet_muted,
+            discreet_auxiliary: self.discreet_auxiliary,
+            selected_foreground: self.selected_foreground,
+            selected_background: self.selected_background,
+            border: self.discreet_muted,
+            error: self.error,
+            success: self.discreet_auxiliary,
+        }
     }
 
     pub fn body(self) -> Style {
@@ -90,7 +93,7 @@ impl Palette {
         Style::default()
             .fg(self.selected_foreground)
             .bg(self.selected_background)
-            .add_modifier(Modifier::BOLD)
+            .add_modifier(Modifier::BOLD | Modifier::REVERSED)
     }
 
     pub fn popup(self) -> Style {
@@ -349,10 +352,36 @@ mod tests {
     fn binding_drives_input_and_help_text() {
         let key = KeyEvent::new(KeyCode::Char('?'), KeyModifiers::NONE);
         assert_eq!(command_for(BINDINGS, key), Some(Command::Help));
-        let lines = help_lines("Reading", BINDINGS, Palette::for_theme(Theme::Dark));
+        let lines = help_lines("Reading", BINDINGS, Palette::terminal());
         assert!(lines[1]
             .spans
             .iter()
             .any(|span| span.content.contains("Full help")));
+    }
+
+    #[test]
+    fn base_colors_inherit_the_terminal_defaults() {
+        let palette = Palette::terminal();
+        assert_eq!(palette.background, Color::Reset);
+        assert_eq!(palette.body, Color::Reset);
+        assert_eq!(palette.selected_background, Color::Reset);
+        assert_eq!(palette.selected_foreground, Color::Reset);
+        assert!(palette.selected().add_modifier.contains(Modifier::REVERSED));
+    }
+
+    #[test]
+    fn discreet_mode_keeps_the_terminal_background() {
+        let palette = Palette::terminal().discreet_mode();
+        assert_eq!(palette.background, Color::Reset);
+        assert_eq!(palette.body, Color::Reset);
+        assert_eq!(palette.muted, Color::DarkGray);
+    }
+
+    #[test]
+    fn semantic_colors_use_the_terminal_ansi_palette() {
+        let colors = DiscreetLogColors::terminal();
+        assert_eq!(colors.info, Color::Green);
+        assert_eq!(colors.warning, Color::Yellow);
+        assert_eq!(colors.error, Color::Red);
     }
 }

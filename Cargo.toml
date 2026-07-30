@@ -2,7 +2,7 @@
 name = "reader"
 version = "0.1.0"
 edition = "2021"
-description = "A local-first CLI/TUI reading tool for EPUB and TXT books."
+description = "A local-first CLI/TUI reading tool for EPUB, TXT, and text-based PDF books."
 license = "MIT"
 
 [dependencies]
@@ -12,11 +12,12 @@ crossterm = "0.29.0"
 dirs = "6.0.0"
 ratatui = { version = "0.30.0", features = ["crossterm_0_29"] }
 roxmltree = "0.21.1"
+pdf-extract = "0.12"
+percent-encoding = "2.3"
 serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
+tempfile = "3"
+time = { version = "0.3.47", features = ["local-offset"] }
 unicode-width = "0.2"
 zip = "8.6.0"
-
-[dev-dependencies]
-tempfile = "3"

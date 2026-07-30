@@ -8,7 +8,7 @@ pub(crate) enum ReadingCommand {
     PreviousScreen,
     NextScreen,
     GoToPercent,
-    Chapters,
+    Contents,
     Search,
     Help,
     Quit,
@@ -18,9 +18,9 @@ pub(crate) enum ReadingCommand {
     PreviousMatch,
     Bookmark,
     Metadata,
-    Privacy,
+    Discreet,
+    Hide,
     Progress,
-    Theme,
 }
 
 const PREVIOUS_KEYS: &[KeyChord] = &[
@@ -35,7 +35,7 @@ const NEXT_KEYS: &[KeyChord] = &[
     KeyChord::plain(KeyCode::PageDown),
 ];
 const GOTO_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('g'))];
-const CHAPTER_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('t'))];
+const CONTENTS_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('t'))];
 const SEARCH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('/'))];
 const HELP_KEYS: &[KeyChord] = &[
     KeyChord::plain(KeyCode::Char('?')),
@@ -51,9 +51,9 @@ const NEXT_MATCH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('n'))];
 const PREVIOUS_MATCH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('N'))];
 const BOOKMARK_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('b'))];
 const METADATA_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('M'))];
-const PRIVACY_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('p'))];
+const DISCREET_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('p'))];
+const HIDE_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::F(12))];
 const PROGRESS_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('s'))];
-const THEME_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('c'))];
 
 pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
     KeyBinding {
@@ -87,12 +87,12 @@ pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         hud_priority: 0,
     },
     KeyBinding {
-        command: ReadingCommand::Chapters,
-        chords: CHAPTER_KEYS,
+        command: ReadingCommand::Contents,
+        chords: CONTENTS_KEYS,
         keys: "t",
         hud_keys: "t",
-        label: "Browse chapters",
-        short_label: "Chapters",
+        label: "Browse contents",
+        short_label: "Contents",
         show_in_hud: true,
         hud_priority: 0,
     },
@@ -187,12 +187,22 @@ pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         hud_priority: 2,
     },
     KeyBinding {
-        command: ReadingCommand::Privacy,
-        chords: PRIVACY_KEYS,
+        command: ReadingCommand::Discreet,
+        chords: DISCREET_KEYS,
         keys: "p",
         hud_keys: "p",
-        label: "Toggle privacy mode",
-        short_label: "Privacy",
+        label: "Toggle discreet mode",
+        short_label: "Discreet",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::Hide,
+        chords: HIDE_KEYS,
+        keys: "F12",
+        hud_keys: "F12",
+        label: "Hide behind diagnostics",
+        short_label: "Hide",
         show_in_hud: false,
         hud_priority: 2,
     },
@@ -206,13 +216,86 @@ pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         show_in_hud: false,
         hud_priority: 2,
     },
+];
+
+pub(crate) const DISCREET_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
     KeyBinding {
-        command: ReadingCommand::Theme,
-        chords: THEME_KEYS,
-        keys: "c",
-        hud_keys: "c",
-        label: "Switch dark/light theme",
-        short_label: "Theme",
+        command: ReadingCommand::PreviousScreen,
+        chords: PREVIOUS_KEYS,
+        keys: "k / Up / PgUp",
+        hud_keys: "k",
+        label: "Previous screen",
+        short_label: "Prev",
+        show_in_hud: true,
+        hud_priority: 0,
+    },
+    KeyBinding {
+        command: ReadingCommand::NextScreen,
+        chords: NEXT_KEYS,
+        keys: "j / Down / Space / PgDn",
+        hud_keys: "j",
+        label: "Next screen",
+        short_label: "Next",
+        show_in_hud: true,
+        hud_priority: 0,
+    },
+    KeyBinding {
+        command: ReadingCommand::Start,
+        chords: START_KEYS,
+        keys: "Home",
+        hud_keys: "Home",
+        label: "Go to start",
+        short_label: "Start",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::End,
+        chords: END_KEYS,
+        keys: "End / G",
+        hud_keys: "End",
+        label: "Go to end",
+        short_label: "End",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::Bookmark,
+        chords: BOOKMARK_KEYS,
+        keys: "b",
+        hud_keys: "b",
+        label: "Add bookmark",
+        short_label: "Bookmark",
+        show_in_hud: true,
+        hud_priority: 1,
+    },
+    KeyBinding {
+        command: ReadingCommand::Discreet,
+        chords: DISCREET_KEYS,
+        keys: "p",
+        hud_keys: "p",
+        label: "Return to normal",
+        short_label: "Normal",
+        show_in_hud: true,
+        hud_priority: 0,
+    },
+    KeyBinding {
+        command: ReadingCommand::Hide,
+        chords: HIDE_KEYS,
+        keys: "F12",
+        hud_keys: "F12",
+        label: "Hide",
+        short_label: "Hide",
+        show_in_hud: true,
+        hud_priority: 0,
+    },
+    KeyBinding {
+        command: ReadingCommand::Quit,
+        chords: QUIT_KEYS,
+        keys: "q / Ctrl+C",
+        hud_keys: "q",
+        label: "Save and quit",
+        short_label: "Quit",
         show_in_hud: false,
         hud_priority: 2,
     },
@@ -222,13 +305,27 @@ pub(crate) fn action_for_key(key: KeyEvent, state: &ReaderState) -> ReaderAction
     if key.code == KeyCode::Char('c') && key.modifiers.contains(KeyModifiers::CONTROL) {
         return ReaderAction::Exit;
     }
+    if key.code == KeyCode::F(12) {
+        return ReaderAction::ToggleHidden;
+    }
+    if state.hidden {
+        return ReaderAction::None;
+    }
+    if state.config.discreet_mode {
+        return command_for(DISCREET_BINDINGS, key)
+            .map(command_action)
+            .or_else(|| {
+                command_for(READING_BINDINGS, key).map(|_| ReaderAction::DiscreetUnavailable)
+            })
+            .unwrap_or(ReaderAction::None);
+    }
 
     match &state.overlay {
         Overlay::None => command_for(READING_BINDINGS, key)
             .map(command_action)
             .unwrap_or(ReaderAction::None),
         Overlay::Percent(_) | Overlay::Search(_) => text_input_action(key),
-        Overlay::Chapters(navigator) => chapter_action(key, navigator.filter_active),
+        Overlay::Contents(navigator) => contents_action(key, navigator.filter_active),
         Overlay::Metadata => match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('M') => ReaderAction::Confirm,
             _ => ReaderAction::None,
@@ -247,7 +344,7 @@ fn command_action(command: ReadingCommand) -> ReaderAction {
         ReadingCommand::PreviousScreen => ReaderAction::PreviousScreen,
         ReadingCommand::NextScreen => ReaderAction::NextScreen,
         ReadingCommand::GoToPercent => ReaderAction::OpenPercent,
-        ReadingCommand::Chapters => ReaderAction::OpenChapters,
+        ReadingCommand::Contents => ReaderAction::OpenContents,
         ReadingCommand::Search => ReaderAction::OpenSearch,
         ReadingCommand::Help => ReaderAction::OpenHelp,
         ReadingCommand::Quit => ReaderAction::Exit,
@@ -257,9 +354,9 @@ fn command_action(command: ReadingCommand) -> ReaderAction {
         ReadingCommand::PreviousMatch => ReaderAction::PreviousSearch,
         ReadingCommand::Bookmark => ReaderAction::AddBookmark,
         ReadingCommand::Metadata => ReaderAction::OpenMetadata,
-        ReadingCommand::Privacy => ReaderAction::TogglePrivacy,
+        ReadingCommand::Discreet => ReaderAction::ToggleDiscreet,
+        ReadingCommand::Hide => ReaderAction::ToggleHidden,
         ReadingCommand::Progress => ReaderAction::ToggleProgress,
-        ReadingCommand::Theme => ReaderAction::ToggleTheme,
     }
 }
 
@@ -275,7 +372,7 @@ fn text_input_action(key: KeyEvent) -> ReaderAction {
     }
 }
 
-fn chapter_action(key: KeyEvent, filter_active: bool) -> ReaderAction {
+fn contents_action(key: KeyEvent, filter_active: bool) -> ReaderAction {
     match key.code {
         KeyCode::Esc => ReaderAction::Cancel,
         KeyCode::Enter => ReaderAction::Confirm,
@@ -327,6 +424,12 @@ mod tests {
                     section_count: 1,
                 },
                 sections,
+                contents: vec![crate::book::ContentsEntry {
+                    title: "One".into(),
+                    depth: 0,
+                    target: crate::book::TextPosition::new(0, 0),
+                }],
+                contents_source: crate::book::ContentsSource::Generated,
             },
             "book".into(),
             Rect::new(0, 0, 80, 24),
@@ -363,6 +466,17 @@ mod tests {
     }
 
     #[test]
+    fn removed_theme_key_has_no_action() {
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE),
+                &state()
+            ),
+            ReaderAction::None
+        );
+    }
+
+    #[test]
     fn release_events_can_be_filtered_by_loop() {
         let release = KeyEvent::new_with_kind(
             KeyCode::Char('q'),
@@ -370,5 +484,73 @@ mod tests {
             KeyEventKind::Release,
         );
         assert_eq!(release.kind, KeyEventKind::Release);
+    }
+
+    #[test]
+    fn f12_is_global_and_hidden_mode_blocks_other_keys() {
+        let mut state = state();
+        state.overlay = Overlay::Search(Default::default());
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE), &state),
+            ReaderAction::ToggleHidden
+        );
+        state.hidden = true;
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
+                &state
+            ),
+            ReaderAction::None
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::CONTROL),
+                &state
+            ),
+            ReaderAction::Exit
+        );
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE), &state),
+            ReaderAction::ToggleHidden
+        );
+    }
+
+    #[test]
+    fn discreet_mode_uses_an_explicit_command_whitelist() {
+        let mut state = state();
+        state.config.discreet_mode = true;
+
+        for (code, expected) in [
+            (KeyCode::Char('j'), ReaderAction::NextScreen),
+            (KeyCode::Char('k'), ReaderAction::PreviousScreen),
+            (KeyCode::Char('b'), ReaderAction::AddBookmark),
+            (KeyCode::Char('p'), ReaderAction::ToggleDiscreet),
+            (KeyCode::Char('q'), ReaderAction::Exit),
+            (KeyCode::Home, ReaderAction::JumpStart),
+            (KeyCode::End, ReaderAction::JumpEnd),
+        ] {
+            assert_eq!(
+                action_for_key(KeyEvent::new(code, KeyModifiers::NONE), &state),
+                expected
+            );
+        }
+
+        for code in [
+            KeyCode::Char('g'),
+            KeyCode::Char('t'),
+            KeyCode::Char('/'),
+            KeyCode::Char('M'),
+            KeyCode::Char('?'),
+            KeyCode::Char('n'),
+            KeyCode::Char('N'),
+            KeyCode::Char('s'),
+            KeyCode::F(1),
+        ] {
+            assert_eq!(
+                action_for_key(KeyEvent::new(code, KeyModifiers::NONE), &state),
+                ReaderAction::DiscreetUnavailable,
+                "key: {code:?}"
+            );
+        }
     }
 }

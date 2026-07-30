@@ -5,7 +5,8 @@ use std::time::SystemTime;
 use anyhow::{bail, Context, Result};
 
 use crate::book::{
-    author_from_txt_path, load_book, BookDocument, BookFormat, ContentMetrics, TextPosition,
+    author_from_txt_path, is_supported_book_path, load_book, BookDocument, BookFormat,
+    ContentMetrics, TextPosition,
 };
 
 pub const LIBRARY_SCHEMA_VERSION: u32 = 2;
@@ -136,11 +137,9 @@ impl Store {
     }
 
     pub fn save(&self) -> Result<()> {
-        if let Some(parent) = self.path.parent() {
-            std::fs::create_dir_all(parent)?;
-        }
         let text = serde_json::to_string_pretty(&self.library)?;
-        std::fs::write(&self.path, text)?;
+        crate::atomic_file::write(&self.path, text.as_bytes())
+            .with_context(|| format!("Failed to save {}", self.path.display()))?;
         Ok(())
     }
 
@@ -153,11 +152,11 @@ impl Store {
             .as_ref()
             .canonicalize()
             .unwrap_or_else(|_| path.as_ref().to_path_buf());
-        let author = document
-            .metadata
-            .author
-            .clone()
-            .or_else(|| author_from_txt_path(path.as_ref()));
+        let author = document.metadata.author.clone().or_else(|| {
+            (document.format == BookFormat::Txt)
+                .then(|| author_from_txt_path(path.as_ref()))
+                .flatten()
+        });
         let content_metrics = document.content_metrics();
 
         if let Some(index) = self
@@ -175,7 +174,6 @@ impl Store {
                 book.author = author;
             }
             apply_metrics(book, content_metrics);
-            self.library.last_book_id = Some(document.id.clone());
             return Ok(&self.library.books[index]);
         }
 
@@ -191,7 +189,6 @@ impl Store {
             missing: false,
             bookmarks: Vec::new(),
         });
-        self.library.last_book_id = Some(document.id.clone());
         Ok(self.library.books.last().expect("book was just inserted"))
     }
 
@@ -328,7 +325,6 @@ impl Store {
         {
             book.progress = Progress::new(book.content_metrics.clamp(progress.position));
             book.missing = false;
-            self.library.last_book_id = Some(book_id.to_string());
         }
     }
 
@@ -394,12 +390,7 @@ impl Store {
 
         for entry in entries.filter_map(|entry| entry.ok()) {
             let path = entry.path();
-            let extension = path
-                .extension()
-                .and_then(|extension| extension.to_str())
-                .unwrap_or_default()
-                .to_ascii_lowercase();
-            if extension != "epub" && extension != "txt" {
+            if !is_supported_book_path(&path) {
                 continue;
             }
             if path
@@ -659,6 +650,12 @@ mod tests {
                 section_count: sections.len(),
             },
             sections,
+            contents: vec![crate::book::ContentsEntry {
+                title: "One".into(),
+                depth: 0,
+                target: TextPosition::new(0, 0),
+            }],
+            contents_source: crate::book::ContentsSource::Generated,
         }
     }
 
@@ -757,8 +754,13 @@ mod tests {
         let mut store = Store::open(dir.path().join("library.json")).unwrap();
         store.add_book(&document, path).unwrap();
 
+        assert!(store.library().last_book_id.is_none());
+        store.set_progress("book", Progress::new(TextPosition::new(0, 2)));
+        assert!(store.library().last_book_id.is_none());
+
         store.record_open("book");
 
         assert!(store.resolve_book("Book").unwrap().last_opened.is_some());
+        assert_eq!(store.library().last_book_id.as_deref(), Some("book"));
     }
 }

@@ -6,6 +6,7 @@ use crossterm::event::{self, Event, KeyCode, KeyEvent, KeyEventKind, KeyModifier
 use ratatui::layout::Rect;
 use ratatui::text::{Line, Span};
 use ratatui::widgets::{Block, Borders, Clear, Paragraph, Wrap};
+use unicode_width::UnicodeWidthStr;
 
 use crate::book::BookFormat;
 use crate::config::ReaderConfig;
@@ -253,7 +254,6 @@ enum ShelfCommandUi {
     Sort,
     Delete,
     Resume,
-    Theme,
     Help,
     Quit,
 }
@@ -275,7 +275,6 @@ const SEARCH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('/'))];
 const SORT_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('s'))];
 const DELETE_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('d'))];
 const RESUME_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('r'))];
-const THEME_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('c'))];
 const HELP_KEYS: &[KeyChord] = &[
     KeyChord::plain(KeyCode::Char('?')),
     KeyChord::plain(KeyCode::F(1)),
@@ -417,16 +416,6 @@ const SHELF_BINDINGS: &[KeyBinding<ShelfCommandUi>] = &[
         show_in_hud: false,
         hud_priority: 2,
     },
-    KeyBinding {
-        command: ShelfCommandUi::Theme,
-        chords: THEME_KEYS,
-        keys: "c",
-        hud_keys: "c",
-        label: "Switch dark/light theme",
-        short_label: "Theme",
-        show_in_hud: false,
-        hud_priority: 2,
-    },
 ];
 
 fn handle_key(
@@ -460,7 +449,7 @@ fn handle_browse_key(
     key: KeyEvent,
     app: &mut ShelfApp,
     store: &mut Store,
-    config: &mut ReaderConfig,
+    _config: &mut ReaderConfig,
 ) -> Result<Option<ShelfOutcome>> {
     match command_for(SHELF_BINDINGS, key) {
         Some(ShelfCommandUi::Quit) => return Ok(Some(ShelfOutcome::Exit)),
@@ -477,11 +466,6 @@ fn handle_browse_key(
             app.query.clear();
         }
         Some(ShelfCommandUi::Sort) => app.cycle_sort(),
-        Some(ShelfCommandUi::Theme) => {
-            config.toggle_theme();
-            config.save()?;
-            app.message = format!("Theme: {}", config.theme.label());
-        }
         Some(ShelfCommandUi::Help) => app.mode = ShelfMode::Help,
         Some(ShelfCommandUi::Delete) => {
             if app.selected_row().is_some() {
@@ -624,8 +608,8 @@ fn handle_confirm_delete_file_key(
     Ok(None)
 }
 
-fn draw(frame: &mut ratatui::Frame<'_>, app: &ShelfApp, store: &Store, config: &ReaderConfig) {
-    let palette = Palette::for_theme(config.theme);
+fn draw(frame: &mut ratatui::Frame<'_>, app: &ShelfApp, store: &Store, _config: &ReaderConfig) {
+    let palette = Palette::terminal();
     fill_background(frame, palette);
     let [status_area, body_area, action_area] = hud_chunks(app.viewport);
 
@@ -726,12 +710,12 @@ fn build_row_line(
         " "
     };
     let prefix = if selected { "> " } else { "  " };
-    let title = truncate(&row.title, 30);
+    let title = fit_column(&row.title, 30);
     let author = row
         .author
         .as_deref()
-        .map(|value| truncate(value, 16))
-        .unwrap_or_else(|| "-".to_string());
+        .map(|value| fit_column(value, 16))
+        .unwrap_or_else(|| fit_column("-", 16));
     let percent = compute_percent(row);
     let bar = progress_bar(percent, PROGRESS_BAR_WIDTH);
     let last = row
@@ -744,12 +728,9 @@ fn build_row_line(
         format!("{}bm", row.bookmark_count)
     };
     let status = if row.missing { "MISS" } else { "OK" };
-    let format = match row.format {
-        BookFormat::Epub => "EPUB",
-        BookFormat::Txt => "TXT",
-    };
+    let format = row.format.label();
     let text = format!(
-        "{prefix}{marker} {title:<30}  {author:<16}  {bar} {percent:>3}%  {last:>10}  {bookmarks:>4}  {format} {status}"
+        "{prefix}{marker} {title}  {author}  {bar} {percent:>3}%  {last:>10}  {bookmarks:>4}  {format} {status}"
     );
     let style = if selected {
         palette.selected()
@@ -813,15 +794,32 @@ fn progress_bar(percent: u16, width: usize) -> String {
 }
 
 fn truncate(text: &str, max: usize) -> String {
-    if text.chars().count() <= max {
+    if text.width() <= max {
         text.to_string()
-    } else if max <= 1 {
+    } else if max == 0 {
+        String::new()
+    } else if max == 1 {
         "\u{2026}".to_string()
     } else {
-        let mut out: String = text.chars().take(max - 1).collect();
+        let mut out = String::new();
+        for ch in text.chars() {
+            let mut candidate = out.clone();
+            candidate.push(ch);
+            candidate.push('\u{2026}');
+            if candidate.width() > max {
+                break;
+            }
+            out.push(ch);
+        }
         out.push('\u{2026}');
         out
     }
+}
+
+fn fit_column(text: &str, width: usize) -> String {
+    let mut fitted = truncate(text, width);
+    fitted.push_str(&" ".repeat(width.saturating_sub(fitted.width())));
+    fitted
 }
 
 fn should_prompt_delete_file(path: &Path, config: &ReaderConfig) -> bool {
@@ -902,6 +900,17 @@ mod tests {
             path: PathBuf::from(format!("/tmp/{id}.txt")),
             missing: false,
         }
+    }
+
+    #[test]
+    fn removed_theme_key_is_not_a_shelf_command() {
+        assert_eq!(
+            command_for(
+                SHELF_BINDINGS,
+                KeyEvent::new(KeyCode::Char('c'), KeyModifiers::NONE)
+            ),
+            None
+        );
     }
 
     #[test]
@@ -1092,6 +1101,12 @@ mod tests {
                 title: "S".into(),
                 text: "hello".into(),
             }],
+            contents: vec![crate::book::ContentsEntry {
+                title: "S".into(),
+                depth: 0,
+                target: crate::book::TextPosition::new(0, 0),
+            }],
+            contents_source: crate::book::ContentsSource::Generated,
         };
         let mut store = Store::open(dir.path().join("library.json")).unwrap();
         store.add_book(&document, &document.path).unwrap();
@@ -1164,6 +1179,12 @@ mod tests {
                 title: "S".into(),
                 text: "x".into(),
             }],
+            contents: vec![crate::book::ContentsEntry {
+                title: "S".into(),
+                depth: 0,
+                target: crate::book::TextPosition::new(0, 0),
+            }],
+            contents_source: crate::book::ContentsSource::Generated,
         };
         let mut store = Store::open(dir.path().join("library.json")).unwrap();
         store.add_book(&document, &document.path).unwrap();
@@ -1292,6 +1313,12 @@ mod tests {
                 title: "S".into(),
                 text: "x".into(),
             }],
+            contents: vec![crate::book::ContentsEntry {
+                title: "S".into(),
+                depth: 0,
+                target: crate::book::TextPosition::new(0, 0),
+            }],
+            contents_source: crate::book::ContentsSource::Generated,
         };
         let mut store = Store::open(dir.path().join("library.json")).unwrap();
         store.add_book(&document, &document.path).unwrap();
@@ -1363,6 +1390,32 @@ mod tests {
     }
 
     #[test]
+    fn shelf_columns_use_terminal_display_width() {
+        for value in [
+            "中文书名",
+            "English title",
+            "中文 mixed title",
+            "Cafe\u{301}",
+            "👨‍👩‍👧‍👦 family",
+        ] {
+            assert_eq!(fit_column(value, 12).width(), 12, "value: {value}");
+            assert!(truncate(value, 6).width() <= 6, "value: {value}");
+        }
+
+        let row = row("cjk", "终端里的中文书名非常长", None);
+        let line = build_row_line(&row, false, None, Palette::terminal());
+        let text = line
+            .spans
+            .iter()
+            .map(|span| span.content.as_ref())
+            .collect::<String>();
+        let bar_start = text
+            .find(['\u{2588}', '\u{2591}'])
+            .expect("row should contain a progress bar");
+        assert_eq!(text[..bar_start].width(), 54);
+    }
+
+    #[test]
     fn format_relative_time_caps_at_date() {
         let now = SystemTime::now();
         assert_eq!(
@@ -1378,36 +1431,32 @@ mod tests {
     }
 
     #[test]
-    fn shelf_themes_and_help_render_with_shared_palette() {
-        for theme in [crate::ui::Theme::Dark, crate::ui::Theme::Light] {
-            let store = make_empty_store();
-            let mut app = ShelfApp {
-                books: vec![row("a", "Alpha", None)],
-                visible: vec![0],
-                selection: 0,
-                sort: ShelfSort::Title,
-                query: String::new(),
-                mode: ShelfMode::Help,
-                viewport: Rect::new(0, 0, 80, 20),
-                message: String::new(),
-                pending_delete_file: None,
-            };
-            app.books[0].progress_tenths = 500;
-            let mut config = ReaderConfig::default();
-            config.theme = theme;
-            let backend = TestBackend::new(80, 20);
-            let mut terminal = Terminal::new(backend).unwrap();
+    fn shelf_inherits_terminal_background_and_renders_help() {
+        let store = make_empty_store();
+        let mut app = ShelfApp {
+            books: vec![row("a", "Alpha", None)],
+            visible: vec![0],
+            selection: 0,
+            sort: ShelfSort::Title,
+            query: String::new(),
+            mode: ShelfMode::Help,
+            viewport: Rect::new(0, 0, 80, 20),
+            message: String::new(),
+            pending_delete_file: None,
+        };
+        app.books[0].progress_tenths = 500;
+        let config = ReaderConfig::default();
+        let backend = TestBackend::new(80, 20);
+        let mut terminal = Terminal::new(backend).unwrap();
 
-            terminal
-                .draw(|frame| draw(frame, &app, &store, &config))
-                .unwrap();
+        terminal
+            .draw(|frame| draw(frame, &app, &store, &config))
+            .unwrap();
 
-            let palette = Palette::for_theme(theme);
-            let cell = terminal.backend().buffer().cell((0, 0)).unwrap();
-            assert_eq!(cell.bg, palette.background);
-            let screen = format!("{}", terminal.backend());
-            assert!(screen.contains("Shelf help"));
-            assert!(screen.contains("Open selected book"));
-        }
+        let cell = terminal.backend().buffer().cell((0, 0)).unwrap();
+        assert_eq!(cell.bg, ratatui::style::Color::Reset);
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains("Shelf help"));
+        assert!(screen.contains("Open selected book"));
     }
 }

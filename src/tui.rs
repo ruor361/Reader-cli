@@ -81,7 +81,11 @@ fn apply_effects(
             ReaderEffect::AddBookmark { label, progress } => {
                 let bookmark = store.add_bookmark(&state.book_id, label, progress)?;
                 state.notify(
-                    format!("Bookmark added: {}", bookmark.id),
+                    if state.config.discreet_mode {
+                        "Bookmark saved".to_string()
+                    } else {
+                        format!("Bookmark added: {}", bookmark.id)
+                    },
                     NotificationKind::Success,
                 );
                 persist_book_state(state, store)?;
@@ -94,8 +98,8 @@ fn apply_effects(
 
 fn persist_book_state(state: &ReaderState, store: &Store) -> Result<()> {
     store.save()?;
-    if state.config.bookshelf_dir.is_some() {
-        crate::bookshelf::sync_sidecar_for_book(store, &state.book_id)?;
+    if let Some(directory) = state.config.bookshelf_dir.as_deref() {
+        crate::bookshelf::sync_sidecar_for_book(store, &state.book_id, directory)?;
     }
     Ok(())
 }

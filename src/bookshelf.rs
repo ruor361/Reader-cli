@@ -1,7 +1,7 @@
 use std::fs;
 use std::path::{Path, PathBuf};
 
-use anyhow::{Context, Result};
+use anyhow::{bail, Context, Result};
 
 use crate::storage::{decode_book_value, LibraryBook, Store, LIBRARY_SCHEMA_VERSION};
 
@@ -21,18 +21,14 @@ pub fn sidecar_path(book_path: &Path) -> PathBuf {
     book_path.with_file_name(name)
 }
 
-pub fn write_sidecar(book: &LibraryBook) -> Result<()> {
+fn write_sidecar(book: &LibraryBook) -> Result<()> {
     let path = sidecar_path(&book.path);
-    if let Some(parent) = path.parent() {
-        fs::create_dir_all(parent)
-            .with_context(|| format!("Failed to create {}", parent.display()))?;
-    }
     let text = serde_json::to_string_pretty(&Sidecar {
         schema_version: LIBRARY_SCHEMA_VERSION,
         book: book.clone(),
     })
     .with_context(|| format!("Failed to serialize sidecar for {}", book.path.display()))?;
-    fs::write(&path, text)
+    crate::atomic_file::write(&path, text.as_bytes())
         .with_context(|| format!("Failed to write sidecar {}", path.display()))?;
     Ok(())
 }
@@ -68,9 +64,30 @@ pub fn remove_sidecar_for_book(book: &LibraryBook) -> Result<()> {
     remove_sidecar(&book.path)
 }
 
-pub fn sync_sidecar_for_book(store: &Store, book_id: &str) -> Result<()> {
+pub fn sync_sidecar_for_book(store: &Store, book_id: &str, bookshelf_dir: &Path) -> Result<()> {
     if let Some(book) = store.book_by_id(book_id) {
+        ensure_book_is_managed(book, bookshelf_dir)?;
         write_sidecar(book)?;
+    }
+    Ok(())
+}
+
+fn ensure_book_is_managed(book: &LibraryBook, bookshelf_dir: &Path) -> Result<()> {
+    let directory = bookshelf_dir.canonicalize().with_context(|| {
+        format!(
+            "Managed bookshelf directory is unavailable: {}",
+            bookshelf_dir.display()
+        )
+    })?;
+    let book_path = book
+        .path
+        .canonicalize()
+        .with_context(|| format!("Book file is unavailable: {}", book.path.display()))?;
+    if !book_path.starts_with(&directory) {
+        bail!(
+            "Refusing to write sidecar outside bookshelf_dir: {}",
+            book.path.display()
+        );
     }
     Ok(())
 }
@@ -88,10 +105,26 @@ pub struct RefreshReport {
 }
 
 pub fn refresh(store: &mut Store, bookshelf_dir: &Path) -> Result<RefreshReport> {
-    let mut report = RefreshReport::default();
-    if !bookshelf_dir.exists() {
-        return Ok(report);
+    let metadata = fs::metadata(bookshelf_dir).with_context(|| {
+        format!(
+            "Bookshelf directory is unavailable: {}",
+            bookshelf_dir.display()
+        )
+    })?;
+    if !metadata.is_dir() {
+        bail!(
+            "Bookshelf path is not a directory: {}",
+            bookshelf_dir.display()
+        );
     }
+    fs::read_dir(bookshelf_dir).with_context(|| {
+        format!(
+            "Bookshelf directory is not readable: {}",
+            bookshelf_dir.display()
+        )
+    })?;
+
+    let mut report = RefreshReport::default();
 
     let mut book_files = Vec::new();
     let mut sidecars = Vec::new();
@@ -220,11 +253,12 @@ fn collect_bookshelf_files(
             .and_then(|e| e.to_str())
             .unwrap_or_default()
             .to_lowercase();
-        if ext == "epub" || ext == "txt" {
+        if crate::book::is_supported_book_path(&path) {
             book_files.push(path);
         } else if ext == "json" {
             if let Some(stem) = path.file_stem().and_then(|s| s.to_str()) {
-                if stem.ends_with(".epub") || stem.ends_with(".txt") {
+                let stem = stem.to_ascii_lowercase();
+                if stem.ends_with(".epub") || stem.ends_with(".txt") || stem.ends_with(".pdf") {
                     sidecars.push(path);
                 }
             }
@@ -303,6 +337,12 @@ mod tests {
                 title: "A".into(),
                 text: "hello".into(),
             }],
+            contents: vec![crate::book::ContentsEntry {
+                title: "A".into(),
+                depth: 0,
+                target: crate::book::TextPosition::new(0, 0),
+            }],
+            contents_source: crate::book::ContentsSource::Generated,
         }
     }
 
@@ -488,5 +528,68 @@ mod tests {
         let _ = refresh(&mut store, &shelf).unwrap();
 
         assert!(unrelated.exists());
+    }
+
+    #[test]
+    fn refresh_preserves_the_most_recently_opened_book() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = dir.path().join("shelf");
+        fs::create_dir(&shelf).unwrap();
+        fs::write(shelf.join("first.txt"), b"first book").unwrap();
+        fs::write(shelf.join("second.txt"), b"second book").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        refresh(&mut store, &shelf).unwrap();
+        let first_id = store.resolve_book("first").unwrap().id.clone();
+        store.record_open(&first_id);
+
+        refresh(&mut store, &shelf).unwrap();
+
+        assert_eq!(
+            store.library().last_book_id.as_deref(),
+            Some(first_id.as_str())
+        );
+    }
+
+    #[test]
+    fn refresh_errors_when_bookshelf_directory_is_missing() {
+        let dir = tempfile::tempdir().unwrap();
+        let missing = dir.path().join("not-mounted");
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+
+        let error = refresh(&mut store, &missing).unwrap_err().to_string();
+
+        assert!(error.contains("Bookshelf directory is unavailable"));
+        assert!(error.contains("not-mounted"));
+    }
+
+    #[test]
+    fn refresh_errors_when_bookshelf_path_is_a_file() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir.path().join("not-a-directory");
+        fs::write(&file, b"x").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+
+        let error = refresh(&mut store, &file).unwrap_err().to_string();
+
+        assert!(error.contains("Bookshelf path is not a directory"));
+    }
+
+    #[test]
+    fn sidecar_sync_refuses_a_book_outside_the_managed_directory() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = dir.path().join("shelf");
+        fs::create_dir(&shelf).unwrap();
+        let external = dir.path().join("external.txt");
+        fs::write(&external, b"outside").unwrap();
+        let document = make_document("external", "External", &external);
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        store.add_book(&document, &external).unwrap();
+
+        let error = sync_sidecar_for_book(&store, "external", &shelf)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("outside bookshelf_dir"));
+        assert!(!sidecar_path(&external).exists());
     }
 }

@@ -1,6 +1,7 @@
 # Reader
 
-`reader` is a local-first command line reading tool for EPUB and TXT books.
+`reader` is a local-first command line reading tool for EPUB, TXT, and
+text-based PDF books.
 
 ## What works in v2
 
@@ -9,11 +10,11 @@
 - Interactive TUI bookshelf: `reader shelf` for browsing, searching, sorting, opening
 - Resume the most recently read book
 - Full-screen terminal reading UI with reflow-stable progress saving
-- EPUB/TXT parsing (EPUB pulls author from OPF metadata; TXT infers from `Title - Author.txt` or `Title (Author).txt` filename patterns)
-- Percentage jump and searchable chapter navigation
+- EPUB/TXT/PDF parsing (EPUB pulls author from OPF metadata; TXT infers from `Title - Author.txt` or `Title (Author).txt` filename patterns; PDF uses document metadata and extracts text page by page)
+- Percentage jump and searchable hierarchical contents navigation (EPUB 3 nav, EPUB 2 NCX, and PDF outlines, with clearly labeled generated fallbacks)
 - Metadata view
 - Display configuration
-- Privacy mode
+- Discreet Mode / 低暴露模式
 - Bookmarks
 - Book search
 
@@ -28,6 +29,7 @@ reader <file>
 reader add <file>
 reader list
 reader shelf
+reader refresh [directory]
 reader shelf refresh [directory]
 reader open <book-id-or-title>
 reader resume
@@ -41,11 +43,12 @@ reader search <book-id-or-title> <query>
 
 ## Development
 
-The repository selects the Windows GNU Rust host through
-`rust-toolchain.toml`; Visual Studio and `link.exe` are not required. On
-Windows, install the GNU toolchain plus a MinGW-w64 `gcc`/`ar` pair on `PATH`,
-then run the normal Cargo commands below. The exact setup commands and the
-verified recovery procedure for interrupted rustup downloads are documented in
+`rust-toolchain.toml` selects the host-native stable Rust toolchain, so Linux,
+macOS, Windows MSVC, and Windows GNU builds are not forced to cross-compile.
+On Windows without Visual Studio Build Tools, install the GNU toolchain plus a
+MinGW-w64 `gcc`/`ar` pair and run Cargo with
+`+stable-x86_64-pc-windows-gnu`. Exact setup commands and the verified recovery
+procedure for interrupted rustup downloads are documented in
 [Windows build setup](doc/Windows构建环境.md).
 
 ```powershell
@@ -73,7 +76,6 @@ book.
 | `/` | Filter by title or author (substring, case-insensitive) |
 | `s` | Cycle sort: recent / title / progress |
 | `d` | Delete the selected book (confirms with `y` / `n`) |
-| `c` | Switch the high-contrast dark/light theme |
 | `?` / `F1` | Open complete shelf help |
 | `q` / `Esc` / `Ctrl+C` | Quit |
 
@@ -94,19 +96,19 @@ root. `q` or `Ctrl+C` quits and saves.
 | Reading | `k` / `Up` / `PageUp` | Previous screen |
 | Reading | `g` | Jump to a whole-book percentage (`0`–`100`, one decimal) |
 | Reading | `Home` / `End` / `G` | Jump to 0% / 100% |
-| Reading | `t` | Open the chapter navigator |
+| Reading | `t` | Open the contents navigator |
 | Reading | `M` | Open book info/metadata |
 | Reading | `/` | Open search prompt |
 | Reading | `s` | Show or hide progress |
-| Reading | `p` | Toggle privacy stack overlay mode |
-| Reading | `c` | Switch dark/light theme |
+| Reading | `p` | Toggle Discreet Mode |
+| Any reader screen | `F12` | Show/restore the full-screen simulated JS diagnostic |
 | Reading | `b` | Add a bookmark at the current text position |
 | Reading | `n` / `N` | Next / previous search result |
 | Reading | `?` / `F1` | Open complete contextual help |
-| Chapters | `j/k`, arrows, PageUp/PageDown | Move selection |
-| Chapters | digits + `Enter` | Jump directly to a chapter number |
-| Chapters | `/`, text, arrows, `Enter` | Filter chapter titles and jump |
-| Chapters | `Esc` | Clear an active filter, then close |
+| Contents | `j/k`, arrows, PageUp/PageDown | Move selection |
+| Contents | digits + `Enter` | Jump directly to a numbered contents entry |
+| Contents | `/`, text, arrows, `Enter` | Filter content titles and jump |
+| Contents | `Esc` | Clear an active filter, then close |
 | Metadata | `Esc` / `Enter` / `M` | Close and return |
 | Search | text | Type query |
 | Search | `Backspace` | Delete character |
@@ -115,8 +117,8 @@ root. `q` or `Ctrl+C` quits and saves.
 
 "Page" in the movement rows means one current terminal screen, not a stored
 book page number. Persistent progress, bookmarks, search results, and shelf
-percentages use a Unicode character position within a chapter, so changing the
-window size, text width, theme, or privacy layout does not move the saved place.
+percentages use a Unicode character position within a content section, so changing the
+window size, text width, or Discreet Mode layout does not move the saved place.
 
 ## Configuration
 
@@ -131,17 +133,35 @@ Supported settings:
 
 ```json
 {
-  "theme": "dark",
   "show_progress": true,
-  "privacy_mode": false,
+  "discreet_mode": false,
   "mouse_support": false,
   "text_width": null
 }
 ```
 
-`theme` accepts `"dark"` or `"light"`. Both palettes explicitly set the
-background, high-contrast body text, muted text, accents, borders, selections,
-and error colors instead of relying on a terminal's dim default foreground.
+The TUI inherits the terminal's default foreground and background instead of
+painting a dark or light theme. Accents and status colors use the terminal's
+ANSI palette, so they follow the terminal profile as well. Existing `theme`
+keys are accepted for compatibility, ignored, and omitted on the next save.
+
+The TUI can choose colors and layout but cannot change the terminal emulator's
+font size. For sustained reading in Windows Terminal, use Cascadia Mono at
+14pt and normal weight; 16pt is a reasonable comfort option on high-DPI screens
+or for longer sessions. Windows Terminal defaults to 12pt, while a controlled
+continuous-screen-reading study comparing 10/12/14pt recommended 14pt. Example
+profile setting:
+
+```json
+"font": {
+  "face": "Cascadia Mono",
+  "size": 14,
+  "weight": "normal"
+}
+```
+
+References: [Windows Terminal appearance settings](https://learn.microsoft.com/en-us/windows/terminal/customize-settings/profile-appearance),
+[screen-reading font-size study](https://pubmed.ncbi.nlm.nih.gov/25665207/).
 
 ### Bookshelf
 
@@ -172,11 +192,12 @@ the sidecar is `Pride and Prejudice.epub.json`. Sidecars are written
 on `reader add`, `reader shelf refresh`, and normal state changes such
 as reading progress and bookmark updates.
 
-#### `reader shelf refresh`
+#### `reader refresh` / `reader shelf refresh`
 
-`reader shelf refresh [directory]` recursively reconciles three sources:
+`reader refresh [directory]` recursively reconciles three sources. The older
+`reader shelf refresh [directory]` spelling remains supported:
 
-1. the on-disk bookshelf directory (`.epub`/`.txt` files),
+1. the on-disk bookshelf directory (`.epub`/`.txt`/`.pdf` files),
 2. the per-book `.json` sidecars, and
 3. the central `library.json`.
 
@@ -192,12 +213,15 @@ Pass a directory once to select and persist the managed bookshelf. Later
 refreshes can omit it and reuse `bookshelf_dir` from `configuration.json`:
 
 ```powershell
-reader shelf refresh .\Liberal
-reader shelf refresh
+reader refresh .\Liberal
+reader refresh
 ```
 
 If no directory has ever been selected, `reader shelf refresh` reports the
 exact command needed instead of requiring a manual JSON edit.
+If the configured directory has disappeared, is not a directory, or cannot be
+read, refresh fails with the affected path instead of reporting a zero-count
+success.
 Missing books remain visible in `reader list` and `reader shelf`, but cannot be
 opened until the file is restored and `reader shelf refresh` is run again.
 `reader remove <book>` removes only the library record and sidecar. Use
@@ -205,26 +229,68 @@ opened until the file is restored and `reader shelf refresh` is run again.
 
 `text_width` may be set to a terminal column width, or left as `null` to use
 the available terminal width. Reader centers the configured width and renders
-it with the selected high-contrast palette.
+it with the terminal's configured colors.
 
 ### Storage migration
 
-`library.json` and bookshelf sidecars use schema version 2. On first load of an
+`library.json` and bookshelf sidecars use schema version 2. Library,
+configuration, and sidecar updates are written to a same-directory temporary
+file and atomically replaced only after the complete file has been flushed, so
+an interrupted write preserves the previous valid state. On first load of an
 older record, Reader converts its page-based position into a stable text
 position. If the record contains a page count, the old page ratio is mapped
 across the book's Unicode character count. Otherwise Reader keeps the old
-chapter and starts at that chapter's beginning. Bookmark labels and library
+content section and starts at that section's beginning. Bookmark labels and library
 metadata are preserved; the next normal save writes the version 2 shape.
 
-When `privacy_mode` is enabled from the reader with `p`, the reader shows a
-fixed simulated JavaScript error stack in the top 80% of the terminal and keeps
-only subdued reading text in the bottom 20%. Book titles, metadata, search text,
-progress, and status messages stay hidden. Privacy mode only affects the TUI
-rendering — CLI errors and panics are always printed in full so they remain
-diagnosable.
+### Discreet Mode / 低暴露模式
+
+When `discreet_mode` is enabled with `p`, Reader shows a neutral simulated
+JavaScript diagnostic above an adaptive 4–8 line reading area
+(when the terminal has at least four rows). For Chinese long-form reading, the
+layout treats 48 terminal columns—about 24 full-width characters—as the
+engineering floor and defaults to the 64-column upper bound—about 32
+characters. Configured widths are clamped to 48–64 columns. Narrower terminals
+preserve a minimal level prefix when possible and give the remaining width to
+the body. The reading block is left-aligned with one terminal column of padding
+rather than centered.
+
+Every non-empty physical body line is formatted as a stable terminal log; blank
+paragraph rows remain blank. Levels use `INFO/WARN/ERROR = 80%/15%/5%`. Full
+timestamps are used when the terminal can preserve the requested body width,
+then prefixes degrade to compact and level-only forms. Log timestamps and
+levels are generated when a page is entered and remain fixed while that page is
+redrawn.
+
+Discreet Mode also keeps the terminal's default foreground and background.
+Timestamps, the row status, and context-free notifications use the terminal's
+muted ANSI color; only the log-level keyword uses the terminal's green, yellow,
+or red ANSI color. The bottom row contains only a muted physical-row range such
+as `rows 128-133/980`.
+
+Only direct navigation, start/end, bookmark, quit, `p`, and `F12` are
+accepted; commands that require metadata or input overlays are rejected with a
+context-free notice. Book titles, metadata, search text, progress, real paths,
+and contextual status messages stay hidden.
+
+Discreet Mode reduces casual visual exposure; it is not encryption, access
+control, screen-capture prevention, or an operating-system privacy boundary.
+Existing configurations containing the legacy `privacy_mode` key are migrated
+on read. If both keys exist, `discreet_mode` wins, and the next save writes only
+the new key.
+
+`F12` is a separate transient hide control available from every reader screen,
+including open prompts. It replaces the entire terminal with a fixed neutral JS
+stack and accepts only `F12` to restore or `Ctrl+C` to save and quit. It never
+changes progress, configuration, overlays, or pending input. Discreet and hide
+rendering only affect the TUI—real CLI errors and panics are always printed in
+full so they remain diagnosable.
 
 ## Not Yet Supported
 
-Reader intentionally keeps this stage focused on core EPUB/TXT reading. FB2,
-MOBI, AZW3, URL reading, dictionary lookup, text-to-speech, double spread, and
-seamless between-chapter reading are not implemented yet.
+PDF support is text-only and reflows extracted content in the terminal.
+PDF outline destinations jump to the beginning of their target physical page.
+Scanned/image-only PDFs, OCR, password prompts, original page rendering, and
+layout preservation are not implemented. FB2, MOBI, AZW3, URL reading,
+dictionary lookup, text-to-speech, double spread, and seamless between-section
+reading are not implemented yet.

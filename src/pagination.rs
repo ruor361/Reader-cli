@@ -46,8 +46,20 @@ pub fn paginate_with_content_height(
     )
 }
 
+pub(crate) fn paginate_with_exact_content_dimensions(
+    sections: &[Section],
+    content_width: u16,
+    content_height: u16,
+) -> Vec<Page> {
+    paginate_with_content_dimensions(
+        sections,
+        usize::from(content_width.max(1)),
+        usize::from(content_height.max(1)),
+    )
+}
+
 fn resolved_content_width(width: u16, text_width: Option<u16>) -> usize {
-    let available = usize::from(width.max(20)).saturating_sub(2).max(20);
+    let available = usize::from(width.saturating_sub(2).max(1));
     text_width
         .map(|value| usize::from(value.max(20)))
         .unwrap_or(available)
