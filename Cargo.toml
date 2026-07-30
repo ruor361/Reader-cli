@@ -18,6 +18,12 @@ serde = { version = "1", features = ["derive"] }
 serde_json = "1"
 sha2 = "0.10"
 tempfile = "3"
-time = { version = "0.3.47", features = ["local-offset"] }
+time = { version = "0.3.47", features = [
+    "formatting",
+    "local-offset",
+    "parsing",
+    "serde-well-known",
+] }
 unicode-width = "0.2"
+uuid = { version = "1", features = ["v4", "v5"] }
 zip = "8.6.0"

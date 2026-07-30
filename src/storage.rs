@@ -9,7 +9,7 @@ use crate::book::{
     ContentMetrics, TextPosition,
 };
 
-pub const LIBRARY_SCHEMA_VERSION: u32 = 2;
+pub const LIBRARY_SCHEMA_VERSION: u32 = 3;
 
 #[derive(Debug)]
 pub struct Store {
@@ -177,6 +177,31 @@ impl Store {
             return Ok(&self.library.books[index]);
         }
 
+        if let Some(index) = self.library.books.iter().position(|book| {
+            book.path == canonical
+                || book
+                    .path
+                    .canonicalize()
+                    .ok()
+                    .is_some_and(|existing| existing == canonical)
+        }) {
+            let previous_id = self.library.books[index].id.clone();
+            let book = &mut self.library.books[index];
+            book.id = document.id.clone();
+            book.title = document.title.clone();
+            book.path = canonical;
+            book.format = document.format;
+            book.missing = false;
+            if book.author.is_none() {
+                book.author = author;
+            }
+            apply_metrics(book, content_metrics);
+            if self.library.last_book_id.as_deref() == Some(previous_id.as_str()) {
+                self.library.last_book_id = Some(document.id.clone());
+            }
+            return Ok(&self.library.books[index]);
+        }
+
         self.library.books.push(LibraryBook {
             id: document.id.clone(),
             title: document.title.clone(),
@@ -227,6 +252,53 @@ impl Store {
         book.last_opened = restored.last_opened;
     }
 
+    pub fn merge_legacy_record(&mut self, legacy_id: &str, current_id: &str) {
+        if legacy_id == current_id {
+            return;
+        }
+        let Some(legacy_index) = self
+            .library
+            .books
+            .iter()
+            .position(|book| book.id == legacy_id)
+        else {
+            return;
+        };
+        let legacy = self.library.books.remove(legacy_index);
+        let Some(current) = self
+            .library
+            .books
+            .iter_mut()
+            .find(|book| book.id == current_id)
+        else {
+            self.library.books.insert(legacy_index, legacy);
+            return;
+        };
+
+        if legacy.last_opened > current.last_opened {
+            current.progress =
+                Progress::new(current.content_metrics.clamp(legacy.progress.position));
+            current.last_opened = legacy.last_opened;
+        }
+        if current.author.is_none() {
+            current.author = legacy.author;
+        }
+        for mut bookmark in legacy.bookmarks {
+            if current
+                .bookmarks
+                .iter()
+                .any(|existing| existing.id == bookmark.id)
+            {
+                continue;
+            }
+            bookmark.position = current.content_metrics.clamp(bookmark.position);
+            current.bookmarks.push(bookmark);
+        }
+        if self.library.last_book_id.as_deref() == Some(legacy_id) {
+            self.library.last_book_id = Some(current_id.to_string());
+        }
+    }
+
     pub fn record_open(&mut self, book_id: &str) {
         if let Some(book) = self
             .library
@@ -241,11 +313,16 @@ impl Store {
 
     pub fn resolve_book(&self, query: &str) -> Result<&LibraryBook> {
         let needle = query.to_lowercase();
+        if let Some(book) = self.library.books.iter().find(|book| book.id == query) {
+            return Ok(book);
+        }
         let matches: Vec<&LibraryBook> = self
             .library
             .books
             .iter()
-            .filter(|book| book.id == query || book.title.to_lowercase().contains(&needle))
+            .filter(|book| {
+                book.id.starts_with(query) || book.title.to_lowercase().contains(&needle)
+            })
             .collect();
 
         match matches.as_slice() {
@@ -328,6 +405,37 @@ impl Store {
         }
     }
 
+    pub fn apply_synced_progress(
+        &mut self,
+        book_id: &str,
+        progress: Progress,
+        last_opened: SystemTime,
+    ) -> bool {
+        let Some(book) = self
+            .library
+            .books
+            .iter_mut()
+            .find(|book| book.id == book_id)
+        else {
+            return false;
+        };
+        let progress = Progress::new(book.content_metrics.clamp(progress.position));
+        let changed = book.progress != progress || book.last_opened != Some(last_opened);
+        book.progress = progress;
+        book.last_opened = Some(last_opened);
+        changed
+    }
+
+    pub fn set_last_book_id(&mut self, book_id: &str) -> bool {
+        if !self.library.books.iter().any(|book| book.id == book_id)
+            || self.library.last_book_id.as_deref() == Some(book_id)
+        {
+            return false;
+        }
+        self.library.last_book_id = Some(book_id.to_string());
+        true
+    }
+
     pub fn add_bookmark(
         &mut self,
         book_id: &str,
@@ -341,7 +449,7 @@ impl Store {
             .find(|book| book.id == book_id)
             .with_context(|| format!("Book not found: {book_id}"))?;
         let bookmark = Bookmark {
-            id: next_bookmark_id(&book.bookmarks),
+            id: uuid::Uuid::new_v4().to_string(),
             label,
             position: book.content_metrics.clamp(progress.position),
         };
@@ -356,9 +464,15 @@ impl Store {
     }
 
     pub fn bookmark_for(&self, book_id: &str, bookmark_id: &str) -> Option<&Bookmark> {
-        self.bookmarks_for(book_id)
+        let bookmarks = self.bookmarks_for(book_id);
+        if let Some(bookmark) = bookmarks.iter().find(|bookmark| bookmark.id == bookmark_id) {
+            return Some(bookmark);
+        }
+        let mut matches = bookmarks
             .iter()
-            .find(|bookmark| bookmark.id == bookmark_id)
+            .filter(|bookmark| bookmark.id.starts_with(bookmark_id));
+        let bookmark = matches.next()?;
+        matches.next().is_none().then_some(bookmark)
     }
 
     pub fn delete_bookmark(&mut self, book_id: &str, bookmark_id: &str) -> Result<Bookmark> {
@@ -368,12 +482,68 @@ impl Store {
             .iter_mut()
             .find(|book| book.id == book_id)
             .with_context(|| format!("Book not found: {book_id}"))?;
-        let index = book
+        let exact = book
             .bookmarks
             .iter()
-            .position(|bookmark| bookmark.id == bookmark_id)
-            .with_context(|| format!("Bookmark not found: {bookmark_id}"))?;
+            .position(|bookmark| bookmark.id == bookmark_id);
+        let index = match exact {
+            Some(index) => index,
+            None => {
+                let matches = book
+                    .bookmarks
+                    .iter()
+                    .enumerate()
+                    .filter(|(_, bookmark)| bookmark.id.starts_with(bookmark_id))
+                    .map(|(index, _)| index)
+                    .collect::<Vec<_>>();
+                match matches.as_slice() {
+                    [index] => *index,
+                    [] => bail!("Bookmark not found: {bookmark_id}"),
+                    _ => bail!("Bookmark id is ambiguous: {bookmark_id}"),
+                }
+            }
+        };
         Ok(book.bookmarks.remove(index))
+    }
+
+    pub fn merge_bookmark(&mut self, book_id: &str, bookmark: Bookmark) -> bool {
+        let Some(book) = self
+            .library
+            .books
+            .iter_mut()
+            .find(|book| book.id == book_id)
+        else {
+            return false;
+        };
+        let mut bookmark = bookmark;
+        bookmark.position = book.content_metrics.clamp(bookmark.position);
+        if let Some(existing) = book
+            .bookmarks
+            .iter_mut()
+            .find(|existing| existing.id == bookmark.id)
+        {
+            if *existing == bookmark {
+                return false;
+            }
+            *existing = bookmark;
+            return true;
+        }
+        book.bookmarks.push(bookmark);
+        true
+    }
+
+    pub fn remove_synced_bookmark(&mut self, book_id: &str, bookmark_id: &str) -> bool {
+        let Some(book) = self
+            .library
+            .books
+            .iter_mut()
+            .find(|book| book.id == book_id)
+        else {
+            return false;
+        };
+        let before = book.bookmarks.len();
+        book.bookmarks.retain(|bookmark| bookmark.id != bookmark_id);
+        before != book.bookmarks.len()
     }
 
     pub fn scan_lib_dir(&mut self, dir: &Path) -> ScanDirResult {
@@ -437,24 +607,15 @@ fn apply_metrics(book: &mut LibraryBook, metrics: ContentMetrics) {
     book.content_metrics = metrics;
 }
 
-fn next_bookmark_id(bookmarks: &[Bookmark]) -> String {
-    let next = bookmarks
-        .iter()
-        .filter_map(|bookmark| bookmark.id.strip_prefix("bm-")?.parse::<usize>().ok())
-        .max()
-        .unwrap_or(0)
-        + 1;
-    format!("bm-{next}")
-}
-
 fn decode_library(text: &str) -> serde_json::Result<Library> {
     let value: serde_json::Value = serde_json::from_str(text)?;
     let version = value
         .get("schema_version")
         .and_then(serde_json::Value::as_u64)
         .unwrap_or(1);
-    if version >= u64::from(LIBRARY_SCHEMA_VERSION) {
+    if version >= 2 {
         let mut library: Library = serde_json::from_value(value)?;
+        library.schema_version = LIBRARY_SCHEMA_VERSION;
         normalize_library_positions(&mut library);
         Ok(library)
     } else {
@@ -762,5 +923,63 @@ mod tests {
 
         assert!(store.resolve_book("Book").unwrap().last_opened.is_some());
         assert_eq!(store.library().last_book_id.as_deref(), Some("book"));
+    }
+
+    #[test]
+    fn content_id_migration_preserves_state_and_resume_reference() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.txt");
+        std::fs::write(&path, "alpha beta gamma delta").unwrap();
+        let legacy_document = document("legacy-path-id", "Book", path.clone());
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        store.add_book(&legacy_document, &path).unwrap();
+        let progress = Progress::new(TextPosition::new(0, 7));
+        store.set_progress("legacy-path-id", progress);
+        store
+            .add_bookmark("legacy-path-id", "Point".into(), progress)
+            .unwrap();
+        store.record_open("legacy-path-id");
+
+        let content_document = load_book(&path).unwrap();
+        let content_id = content_document.id.clone();
+        store.add_book(&content_document, &path).unwrap();
+
+        assert_eq!(store.library().books.len(), 1);
+        let migrated = store.book_by_id(&content_id).unwrap();
+        assert_eq!(migrated.progress, progress);
+        assert_eq!(migrated.bookmarks.len(), 1);
+        assert_eq!(
+            store.library().last_book_id.as_deref(),
+            Some(content_id.as_str())
+        );
+    }
+
+    #[test]
+    fn sidecar_assisted_migration_removes_an_old_path_duplicate() {
+        let dir = tempfile::tempdir().unwrap();
+        let old_path = dir.path().join("old").join("book.txt");
+        let new_path = dir.path().join("new").join("book.txt");
+        std::fs::create_dir_all(old_path.parent().unwrap()).unwrap();
+        std::fs::create_dir_all(new_path.parent().unwrap()).unwrap();
+        std::fs::write(&old_path, "alpha beta gamma delta").unwrap();
+        std::fs::write(&new_path, "alpha beta gamma delta").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        let legacy = document("legacy-path-id", "Book", old_path.clone());
+        store.add_book(&legacy, &old_path).unwrap();
+        let progress = Progress::new(TextPosition::new(0, 9));
+        store.set_progress("legacy-path-id", progress);
+        store.record_open("legacy-path-id");
+
+        let current = load_book(&new_path).unwrap();
+        let current_id = current.id.clone();
+        store.add_book(&current, &new_path).unwrap();
+        store.merge_legacy_record("legacy-path-id", &current_id);
+
+        assert_eq!(store.library().books.len(), 1);
+        assert_eq!(store.progress_for(&current_id), Some(&progress));
+        assert_eq!(
+            store.library().last_book_id.as_deref(),
+            Some(current_id.as_str())
+        );
     }
 }

@@ -1,3 +1,4 @@
+use std::io::Write;
 use std::path::{Path, PathBuf};
 use std::process::ExitCode;
 
@@ -5,8 +6,9 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use reader::book::load_book;
 use reader::bookshelf;
-use reader::cli::{BookmarkCommand, Cli, Command, ShelfCommand};
+use reader::cli::{BookmarkCommand, Cli, Command, ExportFormat, ShelfCommand};
 use reader::config::ReaderConfig;
+use reader::reading_data::{ReadingDataStore, ReadingEvent};
 use reader::shelf::{run_shelf, ShelfOutcome};
 use reader::storage::{LibraryBook, Store};
 use reader::tui::run_reader;
@@ -26,6 +28,7 @@ fn run() -> Result<()> {
     let cli = Cli::parse();
     let mut store = Store::open_default()?;
     let mut config = ReaderConfig::open_default()?;
+    synchronize_reading_data(&mut store, &config)?;
 
     match cli.command {
         Some(Command::Add { file }) => {
@@ -33,9 +36,10 @@ fn run() -> Result<()> {
             let book = import_book(&mut store, &config, &file)?;
             let title = book.title.clone();
             let id = book.id.clone();
+            synchronize_reading_data(&mut store, &config)?;
             store.save()?;
             sync_sidecar_if_configured(&store, &config, &id)?;
-            println!("Added: {} ({})", title, id);
+            println!("Added: {} ({})", title, short_id(&id));
         }
         Some(Command::List) => {
             print_library_table(&store);
@@ -72,18 +76,22 @@ fn run() -> Result<()> {
                 delete_bookshelf_file(&removed, &config)?;
             }
             store.save()?;
-            println!("Removed: {} ({})", removed.title, removed.id);
+            println!("Removed: {} ({})", removed.title, short_id(&removed.id));
         }
         Some(Command::Bookmark { command }) => match command {
             BookmarkCommand::Add { book, label } => {
                 let entry = store.resolve_book(&book)?.clone();
                 let progress = store.progress_for(&entry.id).cloned().unwrap_or_default();
                 let bookmark = store.add_bookmark(&entry.id, label, progress)?;
+                print_sync_warnings(
+                    ReadingDataStore::open_default(&config)?
+                        .append_bookmark_add(&entry.id, &bookmark)?,
+                );
                 store.save()?;
                 sync_sidecar_if_configured(&store, &config, &entry.id)?;
                 println!(
                     "Bookmark added: {} at {} {} · {}",
-                    bookmark.id,
+                    short_id(&bookmark.id),
                     entry.format.section_label().to_ascii_lowercase(),
                     bookmark.position.section_index + 1,
                     format_progress_tenths(
@@ -96,7 +104,7 @@ fn run() -> Result<()> {
                 for bookmark in store.bookmarks_for(&entry.id) {
                     println!(
                         "{}  {} {}  {}  {}",
-                        bookmark.id,
+                        short_id(&bookmark.id),
                         entry.format.section_label().to_ascii_lowercase(),
                         bookmark.position.section_index + 1,
                         format_progress_tenths(
@@ -120,11 +128,26 @@ fn run() -> Result<()> {
             BookmarkCommand::Delete { book, bookmark } => {
                 let entry = store.resolve_book(&book)?.clone();
                 let removed = store.delete_bookmark(&entry.id, &bookmark)?;
+                print_sync_warnings(
+                    ReadingDataStore::open_default(&config)?
+                        .append_bookmark_delete(&entry.id, &removed.id)?,
+                );
                 store.save()?;
                 sync_sidecar_if_configured(&store, &config, &entry.id)?;
-                println!("Deleted bookmark: {} ({})", removed.label, removed.id);
+                println!(
+                    "Deleted bookmark: {} ({})",
+                    removed.label,
+                    short_id(&removed.id)
+                );
             }
         },
+        Some(Command::Export {
+            book,
+            format,
+            output,
+        }) => {
+            export_reading_events(&store, &config, book.as_deref(), format, output.as_deref())?;
+        }
         Some(Command::Search { book, query }) => {
             let entry = store.resolve_book(&book)?.clone();
             let document = load_book(&entry.path)?;
@@ -179,11 +202,12 @@ fn refresh_bookshelf(
         })?,
     };
     let report = bookshelf::refresh(store, &dir)?;
-    store.save()?;
     if supplied_dir {
-        config.bookshelf_dir = Some(dir);
+        config.bookshelf_dir = Some(dir.clone());
         config.save()?;
     }
+    synchronize_reading_data(store, config)?;
+    store.save()?;
     print_refresh_report(&report);
     Ok(())
 }
@@ -243,7 +267,9 @@ fn open_book_in_reader(
         store.save()?;
     }
     let document = load_book(&entry.path)?;
-    let book_id = entry.id.clone();
+    let book_id = store.add_book(&document, &entry.path)?.id.clone();
+    synchronize_reading_data(store, config)?;
+    store.save()?;
     run_reader(document, book_id.clone(), store, config)?;
     sync_sidecar_if_configured(store, config, &book_id)?;
     Ok(())
@@ -294,9 +320,107 @@ fn sync_sidecar_if_configured(store: &Store, config: &ReaderConfig, book_id: &st
         {
             return Ok(());
         }
-        bookshelf::sync_sidecar_for_book(store, book_id, directory)?;
+        if let Err(err) = bookshelf::sync_sidecar_for_book(store, book_id, directory) {
+            eprintln!(
+                "warning: Book state was saved locally but its sidecar could not be updated: {err}"
+            );
+        }
     }
     Ok(())
+}
+
+fn synchronize_reading_data(store: &mut Store, config: &ReaderConfig) -> Result<()> {
+    let data = ReadingDataStore::open_default(config)?;
+    let report = data.synchronize_store(store)?;
+    print_sync_warnings(report.warnings);
+    if report.state_changed {
+        store.save()?;
+    }
+    Ok(())
+}
+
+fn print_sync_warnings(warnings: Vec<String>) {
+    for warning in warnings {
+        eprintln!("warning: {warning}");
+    }
+}
+
+fn export_reading_events(
+    store: &Store,
+    config: &ReaderConfig,
+    book: Option<&str>,
+    format: ExportFormat,
+    output: Option<&Path>,
+) -> Result<()> {
+    let selected_book_id = book
+        .map(|query| store.resolve_book(query).map(|book| book.id.clone()))
+        .transpose()?;
+    let data = ReadingDataStore::open_default(config)?;
+    let sync_report = data.reconcile()?;
+    print_sync_warnings(sync_report.warnings);
+    let stored = data.events_strict()?;
+    let events = stored
+        .into_iter()
+        .filter(|stored| {
+            selected_book_id
+                .as_deref()
+                .is_none_or(|book_id| stored.event.book_id == book_id)
+        })
+        .map(|stored| stored.event)
+        .collect::<Vec<_>>();
+
+    let mut rendered = match format {
+        ExportFormat::Json => serde_json::to_string_pretty(&events)?,
+        ExportFormat::Csv => render_events_csv(&events)?,
+    };
+    if !rendered.ends_with('\n') {
+        rendered.push('\n');
+    }
+    match output {
+        Some(path) => ReadingDataStore::write_export(path, rendered.as_bytes())?,
+        None => {
+            let stdout = std::io::stdout();
+            let mut stdout = stdout.lock();
+            stdout.write_all(rendered.as_bytes())?;
+            stdout.flush()?;
+        }
+    }
+    Ok(())
+}
+
+fn render_events_csv(events: &[ReadingEvent]) -> Result<String> {
+    use time::format_description::well_known::Rfc3339;
+
+    let mut output = String::from(
+        "book_id,started_at,ended_at,start_section_index,start_char_offset,end_section_index,end_char_offset\n",
+    );
+    for event in events {
+        let started = event.started_at.format(&Rfc3339)?;
+        let ended = event.ended_at.format(&Rfc3339)?;
+        output.push_str(&format!(
+            "{},{},{},{},{},{},{}\n",
+            csv_escape(&event.book_id),
+            csv_escape(&started),
+            csv_escape(&ended),
+            event.start_position.section_index,
+            event.start_position.char_offset,
+            event.end_position.section_index,
+            event.end_position.char_offset,
+        ));
+    }
+    Ok(output)
+}
+
+fn csv_escape(value: &str) -> String {
+    if value.contains([',', '"', '\r', '\n']) {
+        format!("\"{}\"", value.replace('"', "\"\""))
+    } else {
+        value.to_string()
+    }
+}
+
+fn short_id(id: &str) -> String {
+    id.chars().take(12).collect()
 }
 
 fn delete_bookshelf_file(book: &LibraryBook, config: &ReaderConfig) -> Result<()> {
@@ -623,6 +747,23 @@ mod tests {
             bookmarks: Vec::new(),
         };
         assert_eq!(progress_percent(&book), 100);
+    }
+
+    #[test]
+    fn csv_export_flattens_positions_and_escapes_values() {
+        let event = ReadingEvent {
+            book_id: "book,one".into(),
+            started_at: time::OffsetDateTime::UNIX_EPOCH,
+            ended_at: time::OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(2),
+            start_position: reader::book::TextPosition::new(1, 2),
+            end_position: reader::book::TextPosition::new(3, 4),
+        };
+
+        let csv = render_events_csv(&[event]).unwrap();
+
+        assert!(csv.starts_with("book_id,started_at,ended_at"));
+        assert!(csv.contains("\"book,one\",1970-01-01T00:00:00Z"));
+        assert!(csv.ends_with(",1,2,3,4\n"));
     }
 
     #[test]

@@ -1,6 +1,6 @@
 use std::path::PathBuf;
 
-use clap::{Parser, Subcommand};
+use clap::{Parser, Subcommand, ValueEnum};
 
 #[derive(Debug, Parser)]
 #[command(
@@ -46,6 +46,15 @@ pub enum Command {
         book: String,
         query: String,
     },
+    /// Export raw reading events.
+    Export {
+        #[arg(value_name = "BOOK")]
+        book: Option<String>,
+        #[arg(long, value_enum, default_value_t = ExportFormat::Json)]
+        format: ExportFormat,
+        #[arg(long, value_name = "FILE")]
+        output: Option<PathBuf>,
+    },
     /// Reconcile the managed bookshelf. This is the short form of
     /// `reader shelf refresh`.
     Refresh {
@@ -74,6 +83,12 @@ pub enum ShelfCommand {
         #[arg(value_name = "DIR")]
         dir: Option<PathBuf>,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, ValueEnum)]
+pub enum ExportFormat {
+    Json,
+    Csv,
 }
 
 #[cfg(test)]
@@ -134,6 +149,27 @@ mod tests {
 
         assert_eq!(book, "abc123");
         assert_eq!(query, "needle");
+    }
+
+    #[test]
+    fn parses_csv_export_to_file() {
+        let cli = Cli::parse_from([
+            "reader",
+            "export",
+            "abc123",
+            "--format",
+            "csv",
+            "--output",
+            "events.csv",
+        ]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Export {
+                book: Some(ref book),
+                format: ExportFormat::Csv,
+                output: Some(ref output),
+            }) if book == "abc123" && output == &PathBuf::from("events.csv")
+        ));
     }
 
     #[test]

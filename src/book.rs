@@ -285,7 +285,7 @@ pub fn load_txt(path: &Path) -> Result<BookDocument> {
     let text = decode_text(&bytes);
     let title = fallback_title(path);
     let stable_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let id = stable_book_id(&stable_path, &title);
+    let id = content_book_id(&bytes);
     let sections = split_txt_sections(&text);
     let contents = generated_contents(&sections);
     let metadata = BookMetadata {
@@ -410,7 +410,7 @@ pub fn load_epub(path: &Path) -> Result<BookDocument> {
     }
 
     let stable_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let id = stable_book_id(&stable_path, &title);
+    let id = content_book_id_for_path(path)?;
     let section_count = sections.len();
     let document_contents =
         load_epub_document_contents(&mut archive, &opf_doc, &manifest, &spine_targets);
@@ -463,7 +463,7 @@ pub fn load_pdf(path: &Path) -> Result<BookDocument> {
         })
         .collect::<Vec<_>>();
     let stable_path = path.canonicalize().unwrap_or_else(|_| path.to_path_buf());
-    let id = stable_book_id(&stable_path, &title);
+    let id = content_book_id_for_path(path)?;
     let section_count = sections.len();
     let document_contents = pdf_extract::Document::load(path)
         .ok()
@@ -875,12 +875,17 @@ pub fn author_from_txt_path(path: &Path) -> Option<String> {
     None
 }
 
-fn stable_book_id(path: &Path, title: &str) -> String {
+fn content_book_id(bytes: &[u8]) -> String {
     let mut hasher = Sha256::new();
-    hasher.update(path.to_string_lossy().as_bytes());
-    hasher.update(title.as_bytes());
+    hasher.update(bytes);
     let hash = hasher.finalize();
-    format!("{:x}", hash)[..12].to_string()
+    format!("{hash:x}")
+}
+
+fn content_book_id_for_path(path: &Path) -> Result<String> {
+    let bytes =
+        std::fs::read(path).with_context(|| format!("Failed to hash {}", path.display()))?;
+    Ok(content_book_id(&bytes))
 }
 
 fn chapter_title_from_html(html: &str) -> Option<String> {
@@ -1261,6 +1266,26 @@ mod tests {
         assert_eq!(document.sections.len(), 2);
         assert_eq!(document.sections[0].text, "First part");
         assert!(document.path.is_absolute());
+    }
+
+    #[test]
+    fn content_book_id_is_path_independent_and_changes_with_bytes() {
+        let dir = tempfile::tempdir().unwrap();
+        let first = dir.path().join("first.txt");
+        let nested = dir.path().join("nested");
+        std::fs::create_dir(&nested).unwrap();
+        let second = nested.join("second.txt");
+        std::fs::write(&first, "same bytes").unwrap();
+        std::fs::write(&second, "same bytes").unwrap();
+
+        let first_document = load_txt(&first).unwrap();
+        let second_document = load_txt(&second).unwrap();
+
+        assert_eq!(first_document.id, second_document.id);
+        assert_eq!(first_document.id.len(), 64);
+
+        std::fs::write(&second, "different bytes").unwrap();
+        assert_ne!(first_document.id, load_txt(&second).unwrap().id);
     }
 
     #[test]

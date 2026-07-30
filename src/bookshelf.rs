@@ -3,12 +3,65 @@ use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
 
+use crate::book::{BookFormat, ContentMetrics};
 use crate::storage::{decode_book_value, LibraryBook, Store, LIBRARY_SCHEMA_VERSION};
+use crate::storage::{Bookmark, Progress};
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Sidecar {
     schema_version: u32,
-    book: LibraryBook,
+    book: PortableBookState,
+}
+
+#[derive(serde::Serialize, serde::Deserialize)]
+struct PortableBookState {
+    id: String,
+    title: String,
+    #[serde(default)]
+    author: Option<String>,
+    format: BookFormat,
+    #[serde(default)]
+    content_metrics: ContentMetrics,
+    #[serde(default)]
+    progress: Progress,
+    #[serde(default)]
+    last_opened: Option<std::time::SystemTime>,
+    #[serde(default)]
+    bookmarks: Vec<Bookmark>,
+}
+
+impl From<&LibraryBook> for PortableBookState {
+    fn from(book: &LibraryBook) -> Self {
+        Self {
+            id: book.id.clone(),
+            title: book.title.clone(),
+            author: book.author.clone(),
+            format: book.format,
+            content_metrics: book.content_metrics.clone(),
+            progress: book.progress,
+            last_opened: book.last_opened,
+            bookmarks: book.bookmarks.clone(),
+        }
+    }
+}
+
+impl PortableBookState {
+    fn into_library_book(self, book_path: &Path) -> LibraryBook {
+        LibraryBook {
+            id: self.id,
+            title: self.title,
+            author: self.author,
+            path: book_path
+                .canonicalize()
+                .unwrap_or_else(|_| book_path.to_path_buf()),
+            format: self.format,
+            content_metrics: self.content_metrics,
+            progress: self.progress,
+            last_opened: self.last_opened,
+            missing: false,
+            bookmarks: self.bookmarks,
+        }
+    }
 }
 
 /// Return the sidecar `.json` path for a book file: `foo.epub` -> `foo.epub.json`.
@@ -25,7 +78,7 @@ fn write_sidecar(book: &LibraryBook) -> Result<()> {
     let path = sidecar_path(&book.path);
     let text = serde_json::to_string_pretty(&Sidecar {
         schema_version: LIBRARY_SCHEMA_VERSION,
-        book: book.clone(),
+        book: PortableBookState::from(book),
     })
     .with_context(|| format!("Failed to serialize sidecar for {}", book.path.display()))?;
     crate::atomic_file::write(&path, text.as_bytes())
@@ -42,12 +95,26 @@ pub fn read_sidecar(book_path: &Path) -> Result<Option<LibraryBook>> {
         .with_context(|| format!("Failed to read sidecar {}", path.display()))?;
     let value: serde_json::Value = serde_json::from_str(&text)
         .with_context(|| format!("Invalid sidecar JSON: {}", path.display()))?;
-    let book = if let Some(book) = value.get("book") {
+    let version = value
+        .get("schema_version")
+        .and_then(serde_json::Value::as_u64)
+        .unwrap_or(1);
+    let book = if version >= 3 {
+        let portable: PortableBookState = serde_json::from_value(
+            value
+                .get("book")
+                .cloned()
+                .with_context(|| format!("Missing sidecar book record: {}", path.display()))?,
+        )
+        .with_context(|| format!("Invalid portable sidecar record: {}", path.display()))?;
+        portable.into_library_book(book_path)
+    } else if let Some(book) = value.get("book") {
         decode_book_value(book.clone())
+            .with_context(|| format!("Invalid sidecar record: {}", path.display()))?
     } else {
         decode_book_value(value)
-    }
-    .with_context(|| format!("Invalid sidecar record: {}", path.display()))?;
+            .with_context(|| format!("Invalid sidecar record: {}", path.display()))?
+    };
     Ok(Some(book))
 }
 
@@ -157,7 +224,9 @@ pub fn refresh(store: &mut Store, bookshelf_dir: &Path) -> Result<RefreshReport>
             Ok(book) => {
                 let book_id = book.id.clone();
                 if let Some(restored) = restored {
+                    let restored_id = restored.id.clone();
                     store.restore_reading_state(&book_id, restored);
+                    store.merge_legacy_record(&restored_id, &book_id);
                 }
                 match previous {
                     None => report.books_added += 1,
@@ -369,6 +438,13 @@ mod tests {
         assert_eq!(read.id, book.id);
         assert_eq!(read.title, book.title);
         assert_eq!(read.missing, book.missing);
+
+        let value: serde_json::Value =
+            serde_json::from_str(&std::fs::read_to_string(sidecar_path(&book.path)).unwrap())
+                .unwrap();
+        assert_eq!(value["schema_version"], 3);
+        assert!(value["book"].get("path").is_none());
+        assert!(value["book"].get("missing").is_none());
     }
 
     #[test]

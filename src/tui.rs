@@ -7,7 +7,8 @@ use ratatui::layout::Rect;
 use crate::book::BookDocument;
 use crate::config::ReaderConfig;
 use crate::reader_input::action_for_key;
-use crate::reader_state::{NotificationKind, ReaderEffect, ReaderState};
+use crate::reader_state::{NotificationKind, ReaderAction, ReaderEffect, ReaderState};
+use crate::reading_data::{ReadingDataStore, SessionCheckpoint, SessionTracker};
 use crate::storage::Store;
 
 struct TerminalGuard;
@@ -24,6 +25,15 @@ pub fn run_reader(
     store: &mut Store,
     config: &mut ReaderConfig,
 ) -> Result<()> {
+    let data = ReadingDataStore::open_default(config)?;
+    let sync_report = data.synchronize_store(store)?;
+    for warning in sync_report.warnings {
+        eprintln!("warning: {warning}");
+    }
+    if sync_report.state_changed {
+        store.save()?;
+    }
+
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
     let size = terminal.size()?;
@@ -33,11 +43,27 @@ pub fn run_reader(
     let saved = store.progress_for(&book_id).copied().unwrap_or_default();
     store.record_open(&book_id);
     let mut state = ReaderState::new(document, book_id, viewport, config.clone(), saved);
-    persist_book_state(&state, store)?;
+    let monotonic_now = Instant::now();
+    let (mut session, initial_checkpoint) = SessionTracker::start(
+        state.book_id.clone(),
+        state.position,
+        time::OffsetDateTime::now_utc(),
+        monotonic_now,
+    );
+    persist_session_checkpoint(&data, &initial_checkpoint, &mut state)?;
+    persist_book_state(&mut state, store)?;
     let mut exit = false;
 
     while !exit {
-        state.expire_notification(Instant::now());
+        let monotonic_now = Instant::now();
+        state.expire_notification(monotonic_now);
+        if let Some(checkpoint) = session.tick(
+            state.position,
+            time::OffsetDateTime::now_utc(),
+            monotonic_now,
+        ) {
+            persist_session_checkpoint(&data, &checkpoint, &mut state)?;
+        }
         terminal.draw(|frame| crate::reader_view::draw(frame, &state))?;
         if !event::poll(Duration::from_millis(100))? {
             continue;
@@ -46,8 +72,54 @@ pub fn run_reader(
         match event::read()? {
             Event::Key(key) if should_handle_key_event(key) => {
                 let action = action_for_key(key, &state);
+                let was_hidden = state.hidden;
+                let wall_now = time::OffsetDateTime::now_utc();
+                let monotonic_now = Instant::now();
+
+                if matches!(action, ReaderAction::ToggleHidden) && !was_hidden {
+                    if let Some(checkpoint) =
+                        session.finish(state.position, wall_now, monotonic_now)
+                    {
+                        persist_session_checkpoint(&data, &checkpoint, &mut state)?;
+                    }
+                } else if !was_hidden && !matches!(action, ReaderAction::None) {
+                    if let Some(checkpoint) =
+                        session.on_activity(state.position, wall_now, monotonic_now)
+                    {
+                        persist_session_checkpoint(&data, &checkpoint, &mut state)?;
+                    }
+                }
+
+                let previous_position = state.position;
                 let effects = state.update(action);
-                exit = apply_effects(effects, &mut state, store, config)?;
+                exit = apply_effects(effects, &mut state, store, config, &data)?;
+
+                if matches!(action, ReaderAction::ToggleHidden) && was_hidden && !state.hidden {
+                    if let Some(checkpoint) = session.on_activity(
+                        state.position,
+                        time::OffsetDateTime::now_utc(),
+                        Instant::now(),
+                    ) {
+                        persist_session_checkpoint(&data, &checkpoint, &mut state)?;
+                    }
+                } else if exit {
+                    if let Some(checkpoint) = session.finish(
+                        state.position,
+                        time::OffsetDateTime::now_utc(),
+                        Instant::now(),
+                    ) {
+                        persist_session_checkpoint(&data, &checkpoint, &mut state)?;
+                    }
+                } else if state.position != previous_position {
+                    if let Some(checkpoint) = session.checkpoint(
+                        state.position,
+                        time::OffsetDateTime::now_utc(),
+                        Instant::now(),
+                        true,
+                    ) {
+                        persist_session_checkpoint(&data, &checkpoint, &mut state)?;
+                    }
+                }
             }
             Event::Resize(width, height) => state.resize(width, height),
             _ => {}
@@ -55,7 +127,7 @@ pub fn run_reader(
     }
 
     store.set_progress(&state.book_id, state.current_progress());
-    persist_book_state(&state, store)?;
+    persist_book_state(&mut state, store)?;
     *config = state.config.clone();
     config.save()?;
     Ok(())
@@ -66,6 +138,7 @@ fn apply_effects(
     state: &mut ReaderState,
     store: &mut Store,
     config: &mut ReaderConfig,
+    data: &ReadingDataStore,
 ) -> Result<bool> {
     let mut exit = false;
     for effect in effects {
@@ -80,11 +153,17 @@ fn apply_effects(
             }
             ReaderEffect::AddBookmark { label, progress } => {
                 let bookmark = store.add_bookmark(&state.book_id, label, progress)?;
+                let warnings = data.append_bookmark_add(&state.book_id, &bookmark)?;
                 state.notify(
-                    if state.config.discreet_mode {
+                    if !warnings.is_empty() {
+                        "Bookmark saved locally; cloud sync is pending".to_string()
+                    } else if state.config.discreet_mode {
                         "Bookmark saved".to_string()
                     } else {
-                        format!("Bookmark added: {}", bookmark.id)
+                        format!(
+                            "Bookmark added: {}",
+                            bookmark.id.chars().take(12).collect::<String>()
+                        )
                     },
                     NotificationKind::Success,
                 );
@@ -96,10 +175,30 @@ fn apply_effects(
     Ok(exit)
 }
 
-fn persist_book_state(state: &ReaderState, store: &Store) -> Result<()> {
+fn persist_session_checkpoint(
+    data: &ReadingDataStore,
+    checkpoint: &SessionCheckpoint,
+    state: &mut ReaderState,
+) -> Result<()> {
+    let warnings = data.upsert_event(checkpoint)?;
+    if !warnings.is_empty() {
+        state.notify(
+            "Reading data saved locally; cloud sync is pending",
+            NotificationKind::Info,
+        );
+    }
+    Ok(())
+}
+
+fn persist_book_state(state: &mut ReaderState, store: &Store) -> Result<()> {
     store.save()?;
-    if let Some(directory) = state.config.bookshelf_dir.as_deref() {
-        crate::bookshelf::sync_sidecar_for_book(store, &state.book_id, directory)?;
+    if let Some(directory) = state.config.bookshelf_dir.clone() {
+        if crate::bookshelf::sync_sidecar_for_book(store, &state.book_id, &directory).is_err() {
+            state.notify(
+                "Book state saved locally; sidecar sync is pending",
+                NotificationKind::Info,
+            );
+        }
     }
     Ok(())
 }

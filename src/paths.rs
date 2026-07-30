@@ -29,6 +29,10 @@ pub fn configuration_path() -> Result<PathBuf> {
     Ok(config_dir()?.join("configuration.json"))
 }
 
+pub fn reading_data_dir() -> Result<PathBuf> {
+    Ok(config_dir()?.join("sync"))
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -56,5 +60,12 @@ mod tests {
         let lib = library_path().unwrap();
         let conf = configuration_path().unwrap();
         assert_eq!(lib.parent(), conf.parent());
+    }
+
+    #[test]
+    fn reading_data_shares_the_config_parent() {
+        let data = reading_data_dir().unwrap();
+        let conf = configuration_path().unwrap();
+        assert_eq!(data.parent(), conf.parent());
     }
 }

@@ -3,7 +3,7 @@
 `reader` is a local-first command line reading tool for EPUB, TXT, and
 text-based PDF books.
 
-## What works in v2
+## What works
 
 - Open a local book directly: `reader book.epub`
 - Add/list/open/remove books in a local bookshelf
@@ -17,6 +17,9 @@ text-based PDF books.
 - Discreet Mode / 低暴露模式
 - Bookmarks
 - Book search
+- Automatic reading-session history with 15-minute idle splitting
+- Folder-based cross-device progress and bookmark synchronization
+- JSON/CSV reading-event export
 
 Reader stores its state in the user's config directory. When a
 `bookshelf_dir` is configured, each book in the bookshelf gets a
@@ -39,7 +42,11 @@ reader bookmark list <book-id-or-title>
 reader bookmark goto <book-id-or-title> <bookmark-id>
 reader bookmark delete <book-id-or-title> <bookmark-id>
 reader search <book-id-or-title> <query>
+reader export [book-id-or-title] [--format json|csv] [--output <file>]
 ```
+
+Book and UUID bookmark identifiers accept a unique prefix. Reader displays the
+first 12 characters while retaining the complete identifier internally.
 
 ## Development
 
@@ -186,11 +193,44 @@ extension.
 #### Sidecar `.json`
 
 Every book in the bookshelf gets a versioned sibling `.json` sidecar containing
-the full record (id, title, author, stable text progress, content metrics, last
-opened, missing status, bookmarks). For `Pride and Prejudice.epub`
+portable metadata and a recovery snapshot (id, title, author, stable text
+progress, content metrics, last opened, and bookmarks). Machine-local absolute
+paths and `missing` state stay in `library.json`. For `Pride and Prejudice.epub`
 the sidecar is `Pride and Prejudice.epub.json`. Sidecars are written
 on `reader add`, `reader shelf refresh`, and normal state changes such
 as reading progress and bookmark updates.
+
+#### Reading data synchronization
+
+Reader always journals reading data under the local config directory. When
+`bookshelf_dir` is configured, the journal is bidirectionally mirrored into
+`<bookshelf_dir>/.reader/`, which a normal OneDrive, Dropbox, iCloud, Syncthing,
+or similar desktop client can synchronize:
+
+- `reading-events/<book-id>/<session-uuid>.json` stores five-field reading
+  events with UTC RFC 3339 timestamps and stable text positions.
+- `bookmark-ops/<book-id>/<operation-uuid>.json` stores additive bookmark
+  changes and deletion tombstones.
+
+Each platform configures its own local cloud mount path. Reader does not log in
+to a cloud provider or upload data over a provider API. Book IDs are full
+SHA-256 fingerprints of file bytes, so the same synchronized file keeps the
+same identity even when its absolute path differs.
+
+A reading session ends on quit, on entering the F12 hidden screen, or after 15
+minutes without input. Active sessions are atomically checkpointed every minute
+and whenever progress changes. A cloud-mirror failure leaves the local journal
+intact and is retried on a later startup, state change, or refresh.
+
+Raw events can be sent to another program or saved atomically:
+
+```powershell
+reader export
+reader export stoner --format csv --output reading.csv
+```
+
+JSON preserves the exact five-field event model. CSV expands each text position
+into section-index and character-offset columns.
 
 #### `reader refresh` / `reader shelf refresh`
 
@@ -233,7 +273,7 @@ it with the terminal's configured colors.
 
 ### Storage migration
 
-`library.json` and bookshelf sidecars use schema version 2. Library,
+`library.json` and bookshelf sidecars use schema version 3. Library,
 configuration, and sidecar updates are written to a same-directory temporary
 file and atomically replaced only after the complete file has been flushed, so
 an interrupted write preserves the previous valid state. On first load of an
@@ -241,7 +281,10 @@ older record, Reader converts its page-based position into a stable text
 position. If the record contains a page count, the old page ratio is mapped
 across the book's Unicode character count. Otherwise Reader keeps the old
 content section and starts at that section's beginning. Bookmark labels and library
-metadata are preserved; the next normal save writes the version 2 shape.
+metadata are preserved. Version 2 path-derived IDs are replaced by content
+fingerprints when a book is next opened or refreshed, while progress, bookmarks,
+and the resume reference are retained; the next normal save writes the version
+3 shape.
 
 ### Discreet Mode / 低暴露模式
 

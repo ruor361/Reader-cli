@@ -11,6 +11,7 @@ pub mod privacy;
 mod reader_input;
 mod reader_state;
 mod reader_view;
+pub mod reading_data;
 pub mod shelf;
 pub mod storage;
 pub mod tui;
@@ -22,7 +23,11 @@ pub use book::{
 pub use config::ReaderConfig;
 pub use discreet::discreet_stack;
 pub use pagination::{paginate, Page};
-pub use paths::{configuration_path, library_path};
+pub use paths::{configuration_path, library_path, reading_data_dir};
 #[allow(deprecated)]
 pub use privacy::privacy_stack;
+pub use reading_data::{
+    BookmarkOperation, BookmarkOperationAction, ReadingDataStore, ReadingEvent, SessionCheckpoint,
+    SessionTracker, StoredReadingEvent,
+};
 pub use storage::{Bookmark, Library, LibraryBook, Progress, ScanDirResult, Store};
