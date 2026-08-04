@@ -473,9 +473,12 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
     let palette = palette.discreet_mode();
     let [stack_area, reading_area, action_area] = discreet_chunks(frame.area());
     frame.render_widget(
-        Paragraph::new(diagnostic_lines(palette))
-            .style(palette.base())
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(discreet_diagnostic_lines(
+            palette,
+            stack_area.height,
+            reading_area.height,
+        ))
+        .style(palette.base()),
         stack_area,
     );
     let layout = discreet_layout(frame.area(), state.config.text_width);
@@ -568,6 +571,26 @@ fn diagnostic_lines(palette: Palette) -> Vec<Line<'static>> {
             }
         })
         .collect()
+}
+
+fn discreet_diagnostic_lines(
+    palette: Palette,
+    stack_height: u16,
+    reading_height: u16,
+) -> Vec<Line<'static>> {
+    let lines = diagnostic_lines(palette);
+    let error_index = discreet_stack()
+        .lines()
+        .position(|line| line == DISCREET_ERROR_LINE)
+        .unwrap_or(0);
+    let available_call_frame_rows =
+        usize::from(stack_height).saturating_sub(error_index.saturating_add(1));
+
+    if available_call_frame_rows < usize::from(reading_height) {
+        lines.into_iter().skip(error_index).collect()
+    } else {
+        lines
+    }
 }
 
 fn stack_frame_line(line: &str, palette: Palette) -> Option<Line<'static>> {
@@ -804,6 +827,30 @@ mod tests {
         assert!(!screen.contains("[g]"));
         assert!(!screen.contains("F12"));
         assert_eq!(screen.matches("TypeError").count(), 1);
+    }
+
+    #[test]
+    fn discreet_render_compacts_the_preamble_to_show_more_stack_frames() {
+        let mut state = state();
+        state.resize(80, 14);
+        state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
+        let backend = TestBackend::new(80, 14);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+
+        let screen = format!("{}", terminal.backend());
+        assert_eq!(discreet_chunks(Rect::new(0, 0, 80, 14))[1].height, 4);
+        for frame in [
+            "resolveActiveSession",
+            "renderWorkspace",
+            "commitHookEffectListMount",
+            "commitPassiveMountOnFiber",
+        ] {
+            assert!(screen.contains(frame), "missing stack frame: {frame}");
+        }
+        assert!(!screen.contains("node .\\dist\\server.js"));
+        assert!(!screen.contains("session.js:184\n  const profile"));
     }
 
     #[test]
