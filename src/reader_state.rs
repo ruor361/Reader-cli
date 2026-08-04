@@ -653,11 +653,7 @@ fn paginate_for_config(
 
 pub(crate) fn discreet_chunks(area: Rect) -> [Rect; 3] {
     let action_height = u16::from(area.height >= 5);
-    let desired_reading_height = match area.height {
-        0..=4 => area.height,
-        5..=17 => 4,
-        _ => (area.height / 3).clamp(4, 8),
-    };
+    let desired_reading_height = (area.height / 3).clamp(1, 8);
     let reading_height = desired_reading_height.min(area.height.saturating_sub(action_height));
     let stack_height = area
         .height
@@ -1007,7 +1003,7 @@ mod tests {
     }
 
     #[test]
-    fn discreet_layout_reserves_a_readable_body_and_action_row() {
+    fn discreet_layout_adapts_the_body_from_one_to_eight_rows() {
         let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 80, 24));
         assert_eq!(stack.height + reading.height + action.height, 24);
         assert_eq!(reading.height, 8);
@@ -1015,12 +1011,22 @@ mod tests {
 
         let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 8));
         assert_eq!(stack.height + reading.height + action.height, 8);
-        assert_eq!(reading.height, 4);
+        assert_eq!(reading.height, 2);
         assert_eq!(action.height, 1);
 
         let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 4));
+        assert_eq!(stack.height, 3);
+        assert_eq!(reading.height, 1);
+        assert_eq!(action.height, 0);
+
+        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 1));
         assert_eq!(stack.height, 0);
-        assert_eq!(reading.height, 4);
+        assert_eq!(reading.height, 1);
+        assert_eq!(action.height, 0);
+
+        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 0));
+        assert_eq!(stack.height, 0);
+        assert_eq!(reading.height, 0);
         assert_eq!(action.height, 0);
     }
 
