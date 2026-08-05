@@ -9,7 +9,7 @@ pub struct ReaderConfig {
     pub mouse_support: bool,
     pub text_width: Option<u16>,
     pub library_dirs: Vec<PathBuf>,
-    /// Bookshelf directory. When set, files added via `add` are copied into
+    /// Bookshelf directory. Files added via `import` (or its `add` alias) are copied into
     /// this directory; the original is left in place. Each book gets a
     /// sibling `*.json` sidecar. `reader shelf refresh` reconciles the
     /// directory contents, sidecars, and `library.json`.

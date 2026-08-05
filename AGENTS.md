@@ -13,7 +13,7 @@ cargo build                    # build
 cargo test                     # run all tests
 cargo test -- <name>           # run a single test
 cargo run -- book.epub         # open a file directly
-cargo run -- add <file>        # add book to library
+cargo run -- import <file>     # copy one book into the managed bookshelf (`add` alias)
 cargo run -- list              # list library as table
 cargo run -- shelf             # open interactive TUI shelf
 cargo run -- open <id|title>   # open from library (fuzzy match)
@@ -33,7 +33,7 @@ Source modules have clear separation:
 - **`storage.rs`** — Versioned v3 machine-local persistence for `Library`, stable progress, content metrics, and materialized bookmarks. v1 page records and v2 path-derived ids migrate through the same implementation. Positions are clamped when content metrics are available. `record_open(book_id)` only records recency.
 - **`paths.rs`** — Single source of truth for the default config/library location. `config_dir()` prefers `$HOME/.config/reader/` (XDG-style, consistent across macOS and Linux) and falls back to `dirs::config_dir()/reader/`. `library_path()` and `configuration_path()` are thin wrappers that return the JSON filenames. Both `Store::open_default` and `ReaderConfig::open_default` route through these.
 - **`config.rs`** — `ReaderConfig` persisted to `configuration.json`. Includes display/Discreet Mode toggles, optional `text_width`, `library_dirs`, and managed `bookshelf_dir`; legacy `privacy_mode` input migrates to `discreet_mode`, while the removed `theme` key is ignored.
-- **`bookshelf.rs`** — Portable v3 sidecar `.json` I/O and refresh reconciliation for EPUB, TXT, and PDF files. Sidecars omit absolute paths and machine-local missing state. Refresh restores seed state when the central library entry is absent, updates content-derived metrics, tracks missing/restored files, and removes orphan sidecars.
+- **`bookshelf.rs`** — Managed single-book import, portable v3 sidecar `.json` I/O, and refresh reconciliation for EPUB, TXT, and PDF files. Imports validate and content-dedupe before an atomic copy; sidecars omit absolute paths and machine-local missing state. Refresh restores seed state when the central library entry is absent, updates content-derived metrics, tracks missing/restored files, and removes orphan sidecars.
 - **`reading_data.rs`** — Five-field UTC reading events, 15-minute idle session tracking, UUID bookmark operation logs, local/cloud journal reconciliation, and materialization of the latest cross-device progress/bookmarks into `Store`. Local data lives under the config directory and mirrors to `<bookshelf_dir>/.reader/`.
 - **`pagination.rs`** — Runtime-only `Page`s with `source_start`/`source_end` positions. The anchored wrapper handles Unicode display width, CJK text, long words, whitespace, and blank lines. `page_for_position()` maps a stable position back to the containing screen after reflow.
 - **`reader_state.rs`** — Pure reader state machine: current stable position, runtime pages, overlays, notifications, percentage/contents/search navigation, and effect values for persistence/config changes.

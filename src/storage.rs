@@ -11,7 +11,7 @@ use crate::book::{
 
 pub const LIBRARY_SCHEMA_VERSION: u32 = 3;
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Store {
     path: PathBuf,
     library: Library,

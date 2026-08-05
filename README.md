@@ -61,8 +61,9 @@ reader book.epub
 Build a local library and open the interactive shelf:
 
 ```sh
-reader add book.epub
-reader add notes.txt
+reader refresh ./Books
+reader import book.epub
+reader import notes.txt
 reader shelf
 ```
 
@@ -70,7 +71,8 @@ Common commands:
 
 ```text
 reader <file>
-reader add <file>
+reader import <file> [--open]
+reader add <file> [--open]     # compatibility alias
 reader list
 reader shelf
 reader open <book-id-or-title>
@@ -122,6 +124,7 @@ and missing-file status for every library entry.
 | `PageDown` / `PageUp` | Move by 10 books |
 | `Enter` | Open the selected book |
 | `r` | Resume the most recently opened book |
+| `i` | Import a book by pasting or typing its path |
 | `/` | Filter by title or author |
 | `s` | Sort by recent activity, title, or progress |
 | `d` | Remove the selected library entry after confirmation |
@@ -130,15 +133,19 @@ and missing-file status for every library entry.
 
 ## Managed bookshelf and synchronization
 
-By default, `reader add` registers a book at its existing path. To create a
-managed bookshelf, pass a directory to `reader refresh`:
+Before importing the first book, create a managed bookshelf by passing an
+existing directory to `reader refresh`:
 
 ```sh
 reader refresh ./Books
 ```
 
-The directory is saved as `bookshelf_dir`. Future additions and direct file
+The directory is saved as `bookshelf_dir`. Future imports and direct file
 opens are copied into it, while the original source file is left untouched.
+`reader import <file>` imports without opening; add `--open` to start reading.
+The older `reader add` spelling remains available as an alias. Inside
+`reader shelf`, press `i` and paste a path to perform the same managed import.
+If no bookshelf is configured, the shelf guides you through setting one first.
 Each managed book receives a sibling `.json` sidecar containing portable
 metadata, progress, and bookmarks.
 

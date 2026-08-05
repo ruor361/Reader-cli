@@ -31,15 +31,11 @@ fn run() -> Result<()> {
     synchronize_reading_data(&mut store, &config)?;
 
     match cli.command {
-        Some(Command::Add { file }) => {
-            let file = resolve_input_path(file)?;
-            let book = import_book(&mut store, &config, &file)?;
-            let title = book.title.clone();
-            let id = book.id.clone();
-            synchronize_reading_data(&mut store, &config)?;
-            store.save()?;
-            sync_sidecar_if_configured(&store, &config, &id)?;
-            println!("Added: {} ({})", title, short_id(&id));
+        Some(Command::Import { file, open }) => {
+            let entry = import_book_from_cli(&mut store, &config, file)?;
+            if open {
+                open_book_in_reader(entry, &mut store, &mut config)?;
+            }
         }
         Some(Command::List) => {
             print_library_table(&store);
@@ -65,7 +61,7 @@ fn run() -> Result<()> {
         Some(Command::Resume) => {
             let entry = store
                 .last_book()?
-                .with_context(|| "No recent book. Open or add a book first.")?
+                .with_context(|| "No recent book. Open or import a book first.")?
                 .clone();
             open_book_in_reader(entry, &mut store, &mut config)?;
         }
@@ -170,15 +166,7 @@ fn run() -> Result<()> {
             let file = cli
                 .file_path()
                 .with_context(|| "Pass a book path or use a subcommand. Try `reader --help`.")?;
-            let file = resolve_input_path(file)?;
-            let book = import_book(&mut store, &config, &file)?;
-            let id = book.id.clone();
-            store.save()?;
-            sync_sidecar_if_configured(&store, &config, &id)?;
-            let entry = store
-                .book_by_id(&id)
-                .with_context(|| format!("Imported book disappeared: {id}"))?
-                .clone();
+            let entry = import_book_from_cli(&mut store, &config, file)?;
             open_book_in_reader(entry, &mut store, &mut config)?;
         }
     }
@@ -193,7 +181,7 @@ fn refresh_bookshelf(
 ) -> Result<()> {
     let supplied_dir = dir.is_some();
     let dir = match dir {
-        Some(dir) => resolve_bookshelf_dir(&dir)?,
+        Some(dir) => bookshelf::resolve_bookshelf_dir(&dir)?,
         None => config.bookshelf_dir.clone().ok_or_else(|| {
             anyhow::anyhow!(
                 "bookshelf_dir is not configured. Pass it once with \
@@ -210,40 +198,6 @@ fn refresh_bookshelf(
     store.save()?;
     print_refresh_report(&report);
     Ok(())
-}
-
-fn resolve_bookshelf_dir(path: &Path) -> Result<PathBuf> {
-    let absolute = if path.is_absolute() {
-        path.to_path_buf()
-    } else {
-        std::env::current_dir()
-            .context("Failed to resolve the current directory")?
-            .join(path)
-    };
-    let absolute = absolute
-        .canonicalize()
-        .with_context(|| format!("Bookshelf directory not found: {}", absolute.display()))?;
-    if !absolute.is_dir() {
-        bail!("Bookshelf path is not a directory: {}", absolute.display());
-    }
-    Ok(user_facing_path(absolute))
-}
-
-#[cfg(windows)]
-fn user_facing_path(path: PathBuf) -> PathBuf {
-    let text = path.to_string_lossy();
-    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
-        return PathBuf::from(format!(r"\\{unc}"));
-    }
-    if let Some(local) = text.strip_prefix(r"\\?\") {
-        return PathBuf::from(local);
-    }
-    path
-}
-
-#[cfg(not(windows))]
-fn user_facing_path(path: PathBuf) -> PathBuf {
-    path
 }
 
 fn open_book_in_reader(
@@ -263,8 +217,9 @@ fn open_book_in_reader(
         .is_some_and(|directory| !path_is_in_dir(&entry.path, directory))
     {
         let source = entry.path.clone();
-        entry = import_book(store, config, &source)?;
-        store.save()?;
+        let outcome = bookshelf::import_managed_book(store, config, &source)?;
+        print_sync_warnings(outcome.warnings);
+        entry = outcome.book;
     }
     let document = load_book(&entry.path)?;
     let book_id = store.add_book(&document, &entry.path)?.id.clone();
@@ -275,41 +230,30 @@ fn open_book_in_reader(
     Ok(())
 }
 
-fn import_book(store: &mut Store, config: &ReaderConfig, source: &Path) -> Result<LibraryBook> {
-    if let Some(existing) = store.book_by_path(source) {
-        if config
-            .bookshelf_dir
-            .as_deref()
-            .is_none_or(|directory| path_is_in_dir(&existing.path, directory))
-        {
-            return Ok(existing.clone());
-        }
-    }
+fn import_book_from_cli(
+    store: &mut Store,
+    config: &ReaderConfig,
+    source: PathBuf,
+) -> Result<LibraryBook> {
+    let source = bookshelf::resolve_input_path(source)?;
+    let outcome = bookshelf::import_managed_book(store, config, &source)?;
+    print_sync_warnings(outcome.warnings);
+    synchronize_reading_data(store, config)?;
+    store.save()?;
+    sync_sidecar_if_configured(store, config, &outcome.book.id)?;
 
-    let stored = match config.bookshelf_dir.as_deref() {
-        Some(dir) => choose_bookshelf_path(store, source, dir)?,
-        None => source.to_path_buf(),
+    let verb = match outcome.disposition {
+        bookshelf::ImportDisposition::Copied => "Imported",
+        bookshelf::ImportDisposition::Reused => "Already imported",
     };
-    let document = load_book(&stored)?;
-    Ok(store.add_book(&document, &stored)?.clone())
-}
-
-fn choose_bookshelf_path(store: &Store, source: &Path, bookshelf_dir: &Path) -> Result<PathBuf> {
-    if path_is_in_dir(source, bookshelf_dir) {
-        return Ok(source.to_path_buf());
-    }
-
-    let file_name = source
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("source path has no filename: {}", source.display()))?;
-    let target = bookshelf_dir.join(file_name);
-    if target.exists() {
-        if store.book_by_path(&target).is_some() {
-            return Ok(target);
-        }
-        return copy_to_library_unique(source, bookshelf_dir);
-    }
-    copy_to_library_unique(source, bookshelf_dir)
+    println!(
+        "{}: {} ({}) -> {}",
+        verb,
+        outcome.book.title,
+        short_id(&outcome.book.id),
+        outcome.book.path.display()
+    );
+    Ok(outcome.book)
 }
 
 fn sync_sidecar_if_configured(store: &Store, config: &ReaderConfig, book_id: &str) -> Result<()> {
@@ -443,7 +387,7 @@ fn delete_bookshelf_file(book: &LibraryBook, config: &ReaderConfig) -> Result<()
 fn print_library_table(store: &Store) {
     let books = store.library().books();
     if books.is_empty() {
-        println!("No books in library. Add a book with `reader add <file>`.");
+        println!("No books in library. Import one with `reader import <file>`.");
         return;
     }
     println!(
@@ -548,86 +492,6 @@ fn render_error(err: &anyhow::Error) -> String {
     format!("Error: {err:?}")
 }
 
-fn resolve_input_path(path: PathBuf) -> Result<PathBuf> {
-    if path.exists() {
-        return Ok(path);
-    }
-
-    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
-        return Ok(path);
-    };
-    let Some(parent) = path
-        .parent()
-        .filter(|parent| !parent.as_os_str().is_empty())
-    else {
-        return Ok(path);
-    };
-
-    let normalized_name = normalize_whitespace(file_name);
-    let mut matches = std::fs::read_dir(parent)
-        .ok()
-        .into_iter()
-        .flatten()
-        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
-        .filter(|candidate| {
-            candidate
-                .file_name()
-                .and_then(|name| name.to_str())
-                .is_some_and(|name| normalize_whitespace(name) == normalized_name)
-        });
-
-    let Some(first) = matches.next() else {
-        return Ok(path);
-    };
-
-    if let Some(second) = matches.next() {
-        bail!(
-            "Multiple files match {} after normalizing spaces: {} and {}",
-            path.display(),
-            first.display(),
-            second.display()
-        );
-    }
-
-    Ok(first)
-}
-
-fn normalize_whitespace(text: &str) -> String {
-    text.split_whitespace().collect::<Vec<_>>().join(" ")
-}
-
-/// Copy `src` into `storage_dir` (creating it if needed) and return the
-/// destination path. If `src` is already inside `storage_dir`, returns it
-/// unchanged. If the destination file already exists, picks a unique
-/// name by appending " (1)", " (2)", ... before the extension.
-fn copy_to_library_unique(src: &Path, storage_dir: &Path) -> Result<PathBuf> {
-    if path_is_in_dir(src, storage_dir) {
-        return Ok(src.to_path_buf());
-    }
-    if !storage_dir.exists() {
-        std::fs::create_dir_all(storage_dir)
-            .with_context(|| format!("Failed to create {}", storage_dir.display()))?;
-    }
-    let file_name = src
-        .file_name()
-        .ok_or_else(|| anyhow::anyhow!("source path has no filename: {}", src.display()))?;
-    let mut target = storage_dir.join(file_name);
-    let mut counter: u32 = 1;
-    while target.exists() {
-        let stem = src.file_stem().and_then(|s| s.to_str()).unwrap_or("book");
-        let ext = src.extension().and_then(|e| e.to_str());
-        let new_name = match ext {
-            Some(ext) if !ext.is_empty() => format!("{} ({}).{}", stem, counter, ext),
-            _ => format!("{} ({})", stem, counter),
-        };
-        target = storage_dir.join(new_name);
-        counter += 1;
-    }
-    std::fs::copy(src, &target)
-        .with_context(|| format!("Failed to copy {} to {}", src.display(), target.display()))?;
-    Ok(target)
-}
-
 fn path_is_in_dir(path: &Path, dir: &Path) -> bool {
     if let (Ok(path), Ok(dir)) = (path.canonicalize(), dir.canonicalize()) {
         return path.starts_with(dir);
@@ -639,41 +503,6 @@ fn path_is_in_dir(path: &Path, dir: &Path) -> bool {
 mod tests {
     use super::*;
     use reader::storage::Progress;
-
-    #[test]
-    fn resolves_file_name_with_collapsed_spaces() {
-        let dir = tempfile::tempdir().unwrap();
-        let file = dir
-            .path()
-            .join("A Grammar of the English Language  Barnes - William Cobbett.epub");
-        std::fs::write(&file, []).unwrap();
-
-        let collapsed = dir
-            .path()
-            .join("A Grammar of the English Language Barnes - William Cobbett.epub");
-
-        assert_eq!(resolve_input_path(collapsed).unwrap(), file);
-    }
-
-    #[test]
-    fn leaves_unknown_file_path_unchanged() {
-        let path = std::path::Path::new("missing").join("book.epub");
-
-        assert_eq!(resolve_input_path(path.clone()).unwrap(), path);
-    }
-
-    #[cfg(windows)]
-    #[test]
-    fn strips_windows_verbatim_prefix_from_persisted_bookshelf_path() {
-        assert_eq!(
-            user_facing_path(PathBuf::from(r"\\?\G:\Document\reader\Liberal")),
-            PathBuf::from(r"G:\Document\reader\Liberal")
-        );
-        assert_eq!(
-            user_facing_path(PathBuf::from(r"\\?\UNC\server\books\Liberal")),
-            PathBuf::from(r"\\server\books\Liberal")
-        );
-    }
 
     #[test]
     fn error_output_always_keeps_real_error_details() {
@@ -764,101 +593,5 @@ mod tests {
         assert!(csv.starts_with("book_id,started_at,ended_at"));
         assert!(csv.contains("\"book,one\",1970-01-01T00:00:00Z"));
         assert!(csv.ends_with(",1,2,3,4\n"));
-    }
-
-    #[test]
-    fn copy_to_library_creates_copy_in_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("source.txt");
-        let storage = dir.path().join("library");
-        std::fs::create_dir(&storage).unwrap();
-        std::fs::write(&src, b"hello world").unwrap();
-
-        let copied = copy_to_library_unique(&src, &storage).unwrap();
-
-        assert_eq!(copied, storage.join("source.txt"));
-        assert!(copied.exists());
-        assert_eq!(std::fs::read(&copied).unwrap(), b"hello world");
-        // Source must still exist — this is a copy, not a move.
-        assert!(src.exists());
-    }
-
-    #[test]
-    fn copy_to_library_creates_target_dir_if_missing() {
-        let dir = tempfile::tempdir().unwrap();
-        let src = dir.path().join("book.epub");
-        let storage = dir.path().join("nested").join("library");
-        std::fs::write(&src, b"epub bytes").unwrap();
-        assert!(!storage.exists());
-
-        let copied = copy_to_library_unique(&src, &storage).unwrap();
-
-        assert!(storage.exists());
-        assert_eq!(copied, storage.join("book.epub"));
-    }
-
-    #[test]
-    fn copy_to_library_appends_unique_suffix_on_collision() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = dir.path().join("library");
-        std::fs::create_dir(&storage).unwrap();
-
-        // Pre-populate `book.epub` so the next copy must pick a different name.
-        std::fs::write(storage.join("book.epub"), b"original").unwrap();
-        let src1 = dir.path().join("book.epub");
-        std::fs::write(&src1, b"second").unwrap();
-
-        let first = copy_to_library_unique(&src1, &storage).unwrap();
-        assert_eq!(first, storage.join("book (1).epub"));
-
-        // Pre-populate `book (1).epub` so the next collision must try ` (2)`.
-        std::fs::write(storage.join("book (1).epub"), b"second placeholder").unwrap();
-        let src2 = dir.path().join("book (1).epub");
-        std::fs::write(&src2, b"third").unwrap();
-        // For src2, parent is the tempdir (not the storage dir), so the
-        // no-op check doesn't kick in. The collision logic still applies.
-        let second = copy_to_library_unique(&src2, &storage).unwrap();
-        assert_eq!(second, storage.join("book (1) (1).epub"));
-    }
-
-    #[test]
-    fn copy_to_library_is_noop_when_src_already_inside_target() {
-        let dir = tempfile::tempdir().unwrap();
-        let storage = dir.path().join("library");
-        std::fs::create_dir(&storage).unwrap();
-        let src = storage.join("already-here.txt");
-        std::fs::write(&src, b"preexisting").unwrap();
-
-        let result = copy_to_library_unique(&src, &storage).unwrap();
-
-        assert_eq!(result, src);
-        // No extra file should have appeared.
-        let entries: Vec<_> = std::fs::read_dir(&storage)
-            .unwrap()
-            .filter_map(|e| e.ok())
-            .collect();
-        assert_eq!(entries.len(), 1);
-    }
-
-    #[test]
-    fn existing_external_record_is_copied_after_bookshelf_is_configured() {
-        let dir = tempfile::tempdir().unwrap();
-        let external = dir.path().join("external.txt");
-        let shelf = dir.path().join("shelf");
-        std::fs::write(&external, b"managed copy").unwrap();
-        std::fs::create_dir(&shelf).unwrap();
-        let mut store = Store::open(dir.path().join("library.json")).unwrap();
-        let initial = import_book(&mut store, &ReaderConfig::default(), &external).unwrap();
-        assert_eq!(initial.path, external.canonicalize().unwrap());
-        let mut config = ReaderConfig::default();
-        config.bookshelf_dir = Some(shelf.clone());
-
-        let managed = import_book(&mut store, &config, &external).unwrap();
-        sync_sidecar_if_configured(&store, &config, &managed.id).unwrap();
-
-        assert!(path_is_in_dir(&managed.path, &shelf));
-        assert!(managed.path.exists());
-        assert!(reader::bookshelf::sidecar_path(&managed.path).exists());
-        assert!(!reader::bookshelf::sidecar_path(&external).exists());
     }
 }

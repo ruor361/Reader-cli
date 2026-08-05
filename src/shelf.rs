@@ -74,6 +74,8 @@ enum ShelfSort {
 enum ShelfMode {
     Browse,
     Search,
+    ConfigureBookshelf,
+    ImportPath,
     ConfirmDelete,
     ConfirmDeleteFile,
     Help,
@@ -229,6 +231,16 @@ impl ShelfApp {
         let next = (current + delta).rem_euclid(len);
         self.selection = next as usize;
     }
+
+    fn select_book(&mut self, book_id: &str) {
+        if let Some(selection) = self
+            .visible
+            .iter()
+            .position(|&index| self.books[index].id == book_id)
+        {
+            self.selection = selection;
+        }
+    }
 }
 
 impl ShelfSort {
@@ -251,6 +263,7 @@ enum ShelfCommandUi {
     PageDown,
     PageUp,
     Search,
+    Import,
     Sort,
     Delete,
     Resume,
@@ -272,6 +285,7 @@ const LAST_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('G'))];
 const PAGE_DOWN_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::PageDown)];
 const PAGE_UP_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::PageUp)];
 const SEARCH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('/'))];
+const IMPORT_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('i'))];
 const SORT_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('s'))];
 const DELETE_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('d'))];
 const RESUME_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('r'))];
@@ -323,6 +337,16 @@ const SHELF_BINDINGS: &[KeyBinding<ShelfCommandUi>] = &[
         hud_keys: "/",
         label: "Filter title or author",
         short_label: "Search",
+        show_in_hud: true,
+        hud_priority: 0,
+    },
+    KeyBinding {
+        command: ShelfCommandUi::Import,
+        chords: IMPORT_KEYS,
+        keys: "i",
+        hud_keys: "i",
+        label: "Import a book",
+        short_label: "Import",
         show_in_hud: true,
         hud_priority: 0,
     },
@@ -431,6 +455,8 @@ fn handle_key(
     match app.mode {
         ShelfMode::Browse => handle_browse_key(key, app, store, config),
         ShelfMode::Search => handle_search_key(key, app),
+        ShelfMode::ConfigureBookshelf => handle_configure_bookshelf_key(key, app, store, config),
+        ShelfMode::ImportPath => handle_import_path_key(key, app, store, config),
         ShelfMode::ConfirmDelete => handle_confirm_delete_key(key, app, store, config),
         ShelfMode::ConfirmDeleteFile => handle_confirm_delete_file_key(key, app),
         ShelfMode::Help => {
@@ -449,7 +475,7 @@ fn handle_browse_key(
     key: KeyEvent,
     app: &mut ShelfApp,
     store: &mut Store,
-    _config: &mut ReaderConfig,
+    config: &mut ReaderConfig,
 ) -> Result<Option<ShelfOutcome>> {
     match command_for(SHELF_BINDINGS, key) {
         Some(ShelfCommandUi::Quit) => return Ok(Some(ShelfOutcome::Exit)),
@@ -464,6 +490,20 @@ fn handle_browse_key(
         Some(ShelfCommandUi::Search) => {
             app.mode = ShelfMode::Search;
             app.query.clear();
+        }
+        Some(ShelfCommandUi::Import) => {
+            app.query.clear();
+            app.recompute_visible();
+            app.mode = if config.bookshelf_dir.is_some() {
+                ShelfMode::ImportPath
+            } else {
+                ShelfMode::ConfigureBookshelf
+            };
+            app.message = if config.bookshelf_dir.is_some() {
+                "Paste or type a book path".to_string()
+            } else {
+                "Set a managed bookshelf directory first".to_string()
+            };
         }
         Some(ShelfCommandUi::Sort) => app.cycle_sort(),
         Some(ShelfCommandUi::Help) => app.mode = ShelfMode::Help,
@@ -538,6 +578,108 @@ fn handle_search_key(key: KeyEvent, app: &mut ShelfApp) -> Result<Option<ShelfOu
         _ => {}
     }
     Ok(None)
+}
+
+fn handle_configure_bookshelf_key(
+    key: KeyEvent,
+    app: &mut ShelfApp,
+    store: &mut Store,
+    config: &mut ReaderConfig,
+) -> Result<Option<ShelfOutcome>> {
+    match key.code {
+        KeyCode::Esc => cancel_path_prompt(app, "Bookshelf setup cancelled"),
+        KeyCode::Backspace => {
+            app.query.pop();
+        }
+        KeyCode::Enter => {
+            let result = (|| -> Result<(PathBuf, crate::bookshelf::RefreshReport)> {
+                let input = crate::bookshelf::path_from_user_input(&app.query)?;
+                let directory = crate::bookshelf::resolve_bookshelf_dir(&input)?;
+                let mut staged_store = store.clone();
+                let mut staged_config = config.clone();
+                let report = crate::bookshelf::refresh(&mut staged_store, &directory)?;
+                staged_config.bookshelf_dir = Some(directory.clone());
+                staged_config.save()?;
+                staged_store.save()?;
+                *store = staged_store;
+                *config = staged_config;
+                Ok((directory, report))
+            })();
+
+            match result {
+                Ok((directory, report)) => {
+                    app.refresh_from_store(store);
+                    app.query.clear();
+                    app.mode = ShelfMode::ImportPath;
+                    app.message = if report.errors.is_empty() {
+                        format!("Bookshelf set: {}. Enter a book path", directory.display())
+                    } else {
+                        format!(
+                            "Bookshelf set with {} refresh error(s); enter a book path",
+                            report.errors.len()
+                        )
+                    };
+                }
+                Err(err) => app.message = format!("Bookshelf setup failed: {err}"),
+            }
+        }
+        KeyCode::Char(ch) => app.query.push(ch),
+        _ => {}
+    }
+    Ok(None)
+}
+
+fn handle_import_path_key(
+    key: KeyEvent,
+    app: &mut ShelfApp,
+    store: &mut Store,
+    config: &ReaderConfig,
+) -> Result<Option<ShelfOutcome>> {
+    match key.code {
+        KeyCode::Esc => cancel_path_prompt(app, "Import cancelled"),
+        KeyCode::Backspace => {
+            app.query.pop();
+        }
+        KeyCode::Enter => {
+            let result = crate::bookshelf::path_from_user_input(&app.query)
+                .and_then(|source| crate::bookshelf::import_managed_book(store, config, &source));
+            match result {
+                Ok(outcome) => {
+                    let warning_count = outcome.warnings.len();
+                    let book_id = outcome.book.id.clone();
+                    let verb = match outcome.disposition {
+                        crate::bookshelf::ImportDisposition::Copied => "Imported",
+                        crate::bookshelf::ImportDisposition::Reused => "Already imported",
+                    };
+                    app.query.clear();
+                    app.mode = ShelfMode::Browse;
+                    app.refresh_from_store(store);
+                    app.select_book(&book_id);
+                    app.message = format!(
+                        "{verb}: {} -> {}{}",
+                        outcome.book.title,
+                        outcome.book.path.display(),
+                        if warning_count == 0 {
+                            String::new()
+                        } else {
+                            format!(" ({warning_count} warning(s))")
+                        }
+                    );
+                }
+                Err(err) => app.message = format!("Import failed: {err}"),
+            }
+        }
+        KeyCode::Char(ch) => app.query.push(ch),
+        _ => {}
+    }
+    Ok(None)
+}
+
+fn cancel_path_prompt(app: &mut ShelfApp, message: &str) {
+    app.mode = ShelfMode::Browse;
+    app.query.clear();
+    app.recompute_visible();
+    app.message = message.to_string();
 }
 
 fn handle_confirm_delete_key(
@@ -618,6 +760,14 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &ShelfApp, store: &Store, _config: 
             Span::styled("Search: /", palette.accent()),
             Span::styled(app.query.clone(), palette.body()),
         ]),
+        ShelfMode::ConfigureBookshelf => Line::from(vec![
+            Span::styled("Bookshelf: ", palette.accent()),
+            Span::styled(app.query.clone(), palette.body()),
+        ]),
+        ShelfMode::ImportPath => Line::from(vec![
+            Span::styled("Import: ", palette.accent()),
+            Span::styled(app.query.clone(), palette.body()),
+        ]),
         _ => Line::from(vec![
             Span::styled("My Library", palette.accent()),
             Span::styled(
@@ -636,7 +786,7 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &ShelfApp, store: &Store, _config: 
     let inner = Block::default().borders(Borders::NONE).inner(body_area);
     if app.books.is_empty() {
         frame.render_widget(
-            Paragraph::new("No books in library. Add a book with `reader add <file>`.")
+            Paragraph::new("No books in library. Press `i` or use `reader import <file>`.")
                 .style(palette.muted())
                 .wrap(Wrap { trim: false }),
             inner,
@@ -669,6 +819,14 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &ShelfApp, store: &Store, _config: 
         ShelfMode::Browse => action_line(SHELF_BINDINGS, app.viewport.width, palette),
         ShelfMode::Search => shelf_prompt_actions(
             &[("Enter", "Apply"), ("Backspace", "Edit"), ("Esc", "Cancel")],
+            palette,
+        ),
+        ShelfMode::ConfigureBookshelf | ShelfMode::ImportPath => shelf_prompt_actions(
+            &[
+                ("Enter", "Confirm"),
+                ("Backspace", "Edit"),
+                ("Esc", "Cancel"),
+            ],
             palette,
         ),
         ShelfMode::ConfirmDelete | ShelfMode::ConfirmDeleteFile => {
@@ -911,6 +1069,120 @@ mod tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn import_key_is_declared_once_in_shelf_bindings() {
+        assert_eq!(
+            command_for(
+                SHELF_BINDINGS,
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE)
+            ),
+            Some(ShelfCommandUi::Import)
+        );
+    }
+
+    #[test]
+    fn import_key_guides_unconfigured_shelf_then_accepts_book_path() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = dir.path().join("shelf");
+        std::fs::create_dir(&shelf).unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        let mut config = ReaderConfig::open(dir.path().join("configuration.json")).unwrap();
+        let mut app = ShelfApp::new(&store, Rect::new(0, 0, 80, 24), None);
+
+        handle_key(
+            KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+            &mut app,
+            &mut store,
+            &mut config,
+        )
+        .unwrap();
+        assert_eq!(app.mode, ShelfMode::ConfigureBookshelf);
+
+        app.query = format!("\"{}\"", shelf.display());
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut store,
+            &mut config,
+        )
+        .unwrap();
+
+        assert_eq!(app.mode, ShelfMode::ImportPath);
+        assert_eq!(
+            config
+                .bookshelf_dir
+                .as_deref()
+                .unwrap()
+                .canonicalize()
+                .unwrap(),
+            shelf.canonicalize().unwrap()
+        );
+        assert!(app.query.is_empty());
+    }
+
+    #[test]
+    fn shelf_import_pastes_quoted_unicode_path_and_selects_new_book() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("downloads");
+        let shelf = dir.path().join("shelf");
+        std::fs::create_dir(&source_dir).unwrap();
+        std::fs::create_dir(&shelf).unwrap();
+        let source = source_dir.join("一地鸡毛.txt");
+        std::fs::write(&source, "刘震云").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        let mut config = ReaderConfig::default();
+        config.bookshelf_dir = Some(shelf.clone());
+        let mut app = ShelfApp::new(&store, Rect::new(0, 0, 80, 24), None);
+        app.mode = ShelfMode::ImportPath;
+        app.query = format!("\"{}\"", source.display());
+
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut store,
+            &mut config,
+        )
+        .unwrap();
+
+        assert_eq!(app.mode, ShelfMode::Browse);
+        assert_eq!(app.selected_row().unwrap().title, "一地鸡毛");
+        assert!(shelf.join("一地鸡毛.txt").exists());
+        assert!(app.message.starts_with("Imported:"));
+    }
+
+    #[test]
+    fn shelf_import_error_stays_in_path_prompt_and_escape_cancels() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = dir.path().join("shelf");
+        std::fs::create_dir(&shelf).unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        let mut config = ReaderConfig::default();
+        config.bookshelf_dir = Some(shelf);
+        let mut app = ShelfApp::new(&store, Rect::new(0, 0, 80, 24), None);
+        app.mode = ShelfMode::ImportPath;
+        app.query = "missing.epub".into();
+
+        handle_key(
+            KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
+            &mut app,
+            &mut store,
+            &mut config,
+        )
+        .unwrap();
+        assert_eq!(app.mode, ShelfMode::ImportPath);
+        assert!(app.message.starts_with("Import failed:"));
+
+        handle_key(
+            KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
+            &mut app,
+            &mut store,
+            &mut config,
+        )
+        .unwrap();
+        assert_eq!(app.mode, ShelfMode::Browse);
+        assert!(app.query.is_empty());
     }
 
     #[test]

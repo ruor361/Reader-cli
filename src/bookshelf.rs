@@ -1,11 +1,329 @@
+use std::fmt::Write as _;
 use std::fs;
+use std::io::Read;
 use std::path::{Path, PathBuf};
 
 use anyhow::{bail, Context, Result};
+use sha2::{Digest, Sha256};
 
-use crate::book::{BookFormat, ContentMetrics};
+use crate::book::{load_book, BookFormat, ContentMetrics};
+use crate::config::ReaderConfig;
 use crate::storage::{decode_book_value, LibraryBook, Store, LIBRARY_SCHEMA_VERSION};
 use crate::storage::{Bookmark, Progress};
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ImportDisposition {
+    Copied,
+    Reused,
+}
+
+#[derive(Debug, Clone)]
+pub struct ImportOutcome {
+    pub book: LibraryBook,
+    pub disposition: ImportDisposition,
+    pub warnings: Vec<String>,
+}
+
+/// Import one supported book into the configured managed bookshelf.
+///
+/// The source is always preserved. The copy is validated before the store is
+/// changed, and identical content already managed by the store is reused.
+pub fn import_managed_book(
+    store: &mut Store,
+    config: &ReaderConfig,
+    source: &Path,
+) -> Result<ImportOutcome> {
+    let bookshelf_dir = config.bookshelf_dir.as_deref().ok_or_else(|| {
+        anyhow::anyhow!(
+            "bookshelf_dir is not configured. Set it once with `reader refresh <DIR>`, then retry the import."
+        )
+    })?;
+    validate_bookshelf_dir(bookshelf_dir)?;
+
+    let source = resolve_input_path(source.to_path_buf())?;
+    let metadata = fs::metadata(&source)
+        .with_context(|| format!("Book file not found: {}", source.display()))?;
+    if !metadata.is_file() {
+        bail!("Book path is not a file: {}", source.display());
+    }
+    if !crate::book::is_supported_book_path(&source) {
+        bail!(
+            "Unsupported book format: {}. Expected EPUB, TXT, or PDF.",
+            source.display()
+        );
+    }
+
+    // Parsing before copying ensures corrupt or unsupported content cannot
+    // leave an orphan in the managed directory.
+    let source_document = load_book(&source)?;
+    let source_id = source_document.id.clone();
+    let (destination, disposition, created_copy) =
+        choose_import_destination(store, &source, bookshelf_dir, &source_id)?;
+
+    let document = if paths_match(&source, &destination) {
+        source_document
+    } else {
+        match load_book(&destination) {
+            Ok(document) if document.id == source_id => document,
+            Ok(document) => {
+                if created_copy {
+                    let _ = fs::remove_file(&destination);
+                }
+                bail!(
+                    "Imported copy failed content verification: expected {}, got {}",
+                    source_id,
+                    document.id
+                );
+            }
+            Err(err) => {
+                if created_copy {
+                    let _ = fs::remove_file(&destination);
+                }
+                return Err(err).with_context(|| {
+                    format!("Failed to validate imported copy {}", destination.display())
+                });
+            }
+        }
+    };
+
+    let mut staged = store.clone();
+    let book = staged.add_book(&document, &destination)?.clone();
+    if let Err(err) = staged.save() {
+        if created_copy {
+            let _ = fs::remove_file(&destination);
+        }
+        return Err(err).context("Failed to save the imported book to the library");
+    }
+
+    let mut warnings = Vec::new();
+    if let Err(err) = sync_sidecar_for_book(&staged, &book.id, bookshelf_dir) {
+        warnings.push(format!(
+            "Book was imported, but its sidecar could not be updated: {err}"
+        ));
+    }
+    *store = staged;
+
+    Ok(ImportOutcome {
+        book,
+        disposition,
+        warnings,
+    })
+}
+
+fn choose_import_destination(
+    store: &Store,
+    source: &Path,
+    bookshelf_dir: &Path,
+    source_id: &str,
+) -> Result<(PathBuf, ImportDisposition, bool)> {
+    if let Some(existing) = store.book_by_id(source_id) {
+        if !existing.missing
+            && path_is_in_dir(&existing.path, bookshelf_dir)
+            && existing.path.is_file()
+            && file_sha256(&existing.path).ok().as_deref() == Some(source_id)
+        {
+            return Ok((existing.path.clone(), ImportDisposition::Reused, false));
+        }
+    }
+
+    if path_is_in_dir(source, bookshelf_dir) {
+        return Ok((source.to_path_buf(), ImportDisposition::Reused, false));
+    }
+
+    let file_name = source
+        .file_name()
+        .ok_or_else(|| anyhow::anyhow!("Source path has no filename: {}", source.display()))?;
+    let mut target = bookshelf_dir.join(file_name);
+    let mut counter = 1_u32;
+    while target.exists() {
+        if target.is_file() && file_sha256(&target).ok().as_deref() == Some(source_id) {
+            return Ok((target, ImportDisposition::Reused, false));
+        }
+        target = suffixed_import_path(source, bookshelf_dir, counter);
+        counter += 1;
+    }
+
+    copy_book_atomically(source, &target, source_id)?;
+    Ok((target, ImportDisposition::Copied, true))
+}
+
+fn suffixed_import_path(source: &Path, bookshelf_dir: &Path, counter: u32) -> PathBuf {
+    let stem = source
+        .file_stem()
+        .and_then(|value| value.to_str())
+        .unwrap_or("book");
+    let name = match source.extension().and_then(|value| value.to_str()) {
+        Some(extension) if !extension.is_empty() => {
+            format!("{stem} ({counter}).{extension}")
+        }
+        _ => format!("{stem} ({counter})"),
+    };
+    bookshelf_dir.join(name)
+}
+
+fn copy_book_atomically(source: &Path, target: &Path, expected_id: &str) -> Result<()> {
+    let directory = target
+        .parent()
+        .with_context(|| format!("Import target has no parent: {}", target.display()))?;
+    let mut input =
+        fs::File::open(source).with_context(|| format!("Failed to open {}", source.display()))?;
+    let mut temporary = tempfile::NamedTempFile::new_in(directory).with_context(|| {
+        format!(
+            "Failed to create a temporary file in {}",
+            directory.display()
+        )
+    })?;
+    std::io::copy(&mut input, &mut temporary).with_context(|| {
+        format!(
+            "Failed to copy {} into {}",
+            source.display(),
+            directory.display()
+        )
+    })?;
+    temporary
+        .as_file()
+        .sync_all()
+        .with_context(|| format!("Failed to flush imported copy for {}", source.display()))?;
+
+    let copied_id = file_sha256(temporary.path())?;
+    if copied_id != expected_id {
+        bail!("Imported copy failed content verification: expected {expected_id}, got {copied_id}");
+    }
+    temporary.persist_noclobber(target).map_err(|err| {
+        anyhow::anyhow!(
+            "Failed to finalize imported copy {}: {}",
+            target.display(),
+            err.error
+        )
+    })?;
+    Ok(())
+}
+
+fn file_sha256(path: &Path) -> Result<String> {
+    let mut file = fs::File::open(path)
+        .with_context(|| format!("Failed to open {} for hashing", path.display()))?;
+    let mut hasher = Sha256::new();
+    let mut buffer = [0_u8; 64 * 1024];
+    loop {
+        let read = file
+            .read(&mut buffer)
+            .with_context(|| format!("Failed to hash {}", path.display()))?;
+        if read == 0 {
+            break;
+        }
+        hasher.update(&buffer[..read]);
+    }
+    let mut id = String::with_capacity(64);
+    for byte in hasher.finalize() {
+        write!(&mut id, "{byte:02x}").expect("writing to a String cannot fail");
+    }
+    Ok(id)
+}
+
+pub fn path_from_user_input(input: &str) -> Result<PathBuf> {
+    let trimmed = input.trim();
+    if trimmed.is_empty() {
+        bail!("Enter a path");
+    }
+    let unquoted = if trimmed.len() >= 2
+        && ((trimmed.starts_with('"') && trimmed.ends_with('"'))
+            || (trimmed.starts_with('\'') && trimmed.ends_with('\'')))
+    {
+        &trimmed[1..trimmed.len() - 1]
+    } else {
+        trimmed
+    };
+    resolve_input_path(PathBuf::from(unquoted))
+}
+
+pub fn resolve_input_path(path: PathBuf) -> Result<PathBuf> {
+    if path.exists() {
+        return Ok(path);
+    }
+
+    let Some(file_name) = path.file_name().and_then(|name| name.to_str()) else {
+        return Ok(path);
+    };
+    let Some(parent) = path
+        .parent()
+        .filter(|parent| !parent.as_os_str().is_empty())
+    else {
+        return Ok(path);
+    };
+
+    let normalized_name = normalize_whitespace(file_name);
+    let mut matches = fs::read_dir(parent)
+        .ok()
+        .into_iter()
+        .flatten()
+        .filter_map(|entry| entry.ok().map(|entry| entry.path()))
+        .filter(|candidate| {
+            candidate
+                .file_name()
+                .and_then(|name| name.to_str())
+                .is_some_and(|name| normalize_whitespace(name) == normalized_name)
+        });
+
+    let Some(first) = matches.next() else {
+        return Ok(path);
+    };
+    if let Some(second) = matches.next() {
+        bail!(
+            "Multiple files match {} after normalizing spaces: {} and {}",
+            path.display(),
+            first.display(),
+            second.display()
+        );
+    }
+    Ok(first)
+}
+
+fn normalize_whitespace(text: &str) -> String {
+    text.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+pub fn resolve_bookshelf_dir(path: &Path) -> Result<PathBuf> {
+    let absolute = if path.is_absolute() {
+        path.to_path_buf()
+    } else {
+        std::env::current_dir()
+            .context("Failed to resolve the current directory")?
+            .join(path)
+    };
+    let absolute = absolute
+        .canonicalize()
+        .with_context(|| format!("Bookshelf directory not found: {}", absolute.display()))?;
+    validate_bookshelf_dir(&absolute)?;
+    Ok(user_facing_path(absolute))
+}
+
+fn validate_bookshelf_dir(path: &Path) -> Result<()> {
+    let metadata = fs::metadata(path)
+        .with_context(|| format!("Bookshelf directory is unavailable: {}", path.display()))?;
+    if !metadata.is_dir() {
+        bail!("Bookshelf path is not a directory: {}", path.display());
+    }
+    fs::read_dir(path)
+        .with_context(|| format!("Bookshelf directory is not readable: {}", path.display()))?;
+    Ok(())
+}
+
+#[cfg(windows)]
+fn user_facing_path(path: PathBuf) -> PathBuf {
+    let text = path.to_string_lossy();
+    if let Some(unc) = text.strip_prefix(r"\\?\UNC\") {
+        return PathBuf::from(format!(r"\\{unc}"));
+    }
+    if let Some(local) = text.strip_prefix(r"\\?\") {
+        return PathBuf::from(local);
+    }
+    path
+}
+
+#[cfg(not(windows))]
+fn user_facing_path(path: PathBuf) -> PathBuf {
+    path
+}
 
 #[derive(serde::Serialize, serde::Deserialize)]
 struct Sidecar {
@@ -413,6 +731,187 @@ mod tests {
             }],
             contents_source: crate::book::ContentsSource::Generated,
         }
+    }
+
+    fn managed_config(path: &Path) -> ReaderConfig {
+        let mut config = ReaderConfig::default();
+        config.bookshelf_dir = Some(path.to_path_buf());
+        config
+    }
+
+    #[test]
+    fn managed_import_requires_a_configured_bookshelf_without_mutating_state() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("book.txt");
+        fs::write(&source, "hello").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+
+        let error = import_managed_book(&mut store, &ReaderConfig::default(), &source)
+            .unwrap_err()
+            .to_string();
+
+        assert!(error.contains("reader refresh <DIR>"));
+        assert!(store.library().books().is_empty());
+        assert_eq!(fs::read_to_string(&source).unwrap(), "hello");
+    }
+
+    #[test]
+    fn managed_import_copies_saves_and_writes_sidecar_while_preserving_source() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("source").join("一地鸡毛.txt");
+        let shelf = dir.path().join("shelf");
+        fs::create_dir_all(source.parent().unwrap()).unwrap();
+        fs::create_dir(&shelf).unwrap();
+        fs::write(&source, "刘震云").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+
+        let outcome = import_managed_book(&mut store, &managed_config(&shelf), &source).unwrap();
+
+        assert_eq!(outcome.disposition, ImportDisposition::Copied);
+        assert_eq!(
+            outcome.book.path,
+            shelf.join("一地鸡毛.txt").canonicalize().unwrap()
+        );
+        assert_eq!(fs::read_to_string(&source).unwrap(), "刘震云");
+        assert_eq!(fs::read_to_string(&outcome.book.path).unwrap(), "刘震云");
+        assert!(sidecar_path(&outcome.book.path).exists());
+        let reopened = Store::open(dir.path().join("library.json")).unwrap();
+        assert!(reopened.book_by_id(&outcome.book.id).is_some());
+    }
+
+    #[test]
+    fn managed_import_reuses_content_already_registered_in_bookshelf() {
+        let dir = tempfile::tempdir().unwrap();
+        let sources = dir.path().join("sources");
+        let shelf = dir.path().join("shelf");
+        fs::create_dir(&sources).unwrap();
+        fs::create_dir(&shelf).unwrap();
+        let first = sources.join("first.txt");
+        let duplicate = sources.join("duplicate.txt");
+        fs::write(&first, "same bytes").unwrap();
+        fs::write(&duplicate, "same bytes").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        let config = managed_config(&shelf);
+        let original = import_managed_book(&mut store, &config, &first).unwrap();
+
+        let outcome = import_managed_book(&mut store, &config, &duplicate).unwrap();
+
+        assert_eq!(outcome.disposition, ImportDisposition::Reused);
+        assert_eq!(outcome.book.path, original.book.path);
+        assert!(!shelf.join("duplicate.txt").exists());
+        assert_eq!(store.library().books().len(), 1);
+    }
+
+    #[test]
+    fn managed_import_reuses_unregistered_same_name_with_identical_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        let shelf = dir.path().join("shelf");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&shelf).unwrap();
+        let source = source_dir.join("book.txt");
+        let existing = shelf.join("book.txt");
+        fs::write(&source, "same bytes").unwrap();
+        fs::write(&existing, "same bytes").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+
+        let outcome = import_managed_book(&mut store, &managed_config(&shelf), &source).unwrap();
+
+        assert_eq!(outcome.disposition, ImportDisposition::Reused);
+        assert_eq!(outcome.book.path, existing.canonicalize().unwrap());
+        assert!(!shelf.join("book (1).txt").exists());
+    }
+
+    #[test]
+    fn managed_import_suffixes_same_name_with_different_content() {
+        let dir = tempfile::tempdir().unwrap();
+        let source_dir = dir.path().join("source");
+        let shelf = dir.path().join("shelf");
+        fs::create_dir(&source_dir).unwrap();
+        fs::create_dir(&shelf).unwrap();
+        let source = source_dir.join("book.txt");
+        fs::write(&source, "new content").unwrap();
+        fs::write(shelf.join("book.txt"), "old content").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+
+        let outcome = import_managed_book(&mut store, &managed_config(&shelf), &source).unwrap();
+
+        assert_eq!(outcome.disposition, ImportDisposition::Copied);
+        assert_eq!(
+            outcome.book.path,
+            shelf.join("book (1).txt").canonicalize().unwrap()
+        );
+        assert_eq!(
+            fs::read_to_string(shelf.join("book.txt")).unwrap(),
+            "old content"
+        );
+    }
+
+    #[test]
+    fn managed_import_reuses_a_source_already_inside_bookshelf() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = dir.path().join("shelf");
+        fs::create_dir(&shelf).unwrap();
+        let source = shelf.join("book.txt");
+        fs::write(&source, "already managed").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+
+        let outcome = import_managed_book(&mut store, &managed_config(&shelf), &source).unwrap();
+
+        assert_eq!(outcome.disposition, ImportDisposition::Reused);
+        assert_eq!(outcome.book.path, source.canonicalize().unwrap());
+    }
+
+    #[test]
+    fn invalid_book_is_rejected_without_copy_or_library_record() {
+        let dir = tempfile::tempdir().unwrap();
+        let shelf = dir.path().join("shelf");
+        fs::create_dir(&shelf).unwrap();
+        let source = dir.path().join("broken.epub");
+        fs::write(&source, "not an epub").unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+
+        assert!(import_managed_book(&mut store, &managed_config(&shelf), &source).is_err());
+        assert!(!shelf.join("broken.epub").exists());
+        assert!(store.library().books().is_empty());
+    }
+
+    #[test]
+    fn pasted_quoted_unicode_path_is_unwrapped() {
+        let dir = tempfile::tempdir().unwrap();
+        let source = dir.path().join("一地鸡毛.txt");
+        fs::write(&source, "text").unwrap();
+
+        let input = format!("  \"{}\"  ", source.display());
+
+        assert_eq!(path_from_user_input(&input).unwrap(), source);
+    }
+
+    #[test]
+    fn resolves_file_name_with_collapsed_spaces() {
+        let dir = tempfile::tempdir().unwrap();
+        let file = dir
+            .path()
+            .join("A Grammar of the English Language  Barnes - William Cobbett.epub");
+        fs::write(&file, []).unwrap();
+        let collapsed = dir
+            .path()
+            .join("A Grammar of the English Language Barnes - William Cobbett.epub");
+
+        assert_eq!(resolve_input_path(collapsed).unwrap(), file);
+    }
+
+    #[cfg(windows)]
+    #[test]
+    fn strips_windows_verbatim_prefix_from_persisted_bookshelf_path() {
+        assert_eq!(
+            user_facing_path(PathBuf::from(r"\\?\G:\Document\reader\Liberal")),
+            PathBuf::from(r"G:\Document\reader\Liberal")
+        );
+        assert_eq!(
+            user_facing_path(PathBuf::from(r"\\?\UNC\server\books\Liberal")),
+            PathBuf::from(r"\\server\books\Liberal")
+        );
     }
 
     #[test]

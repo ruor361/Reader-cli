@@ -25,8 +25,13 @@ impl Cli {
 
 #[derive(Debug, Subcommand)]
 pub enum Command {
-    Add {
+    /// Import one book into the managed bookshelf.
+    #[command(name = "import", visible_alias = "add")]
+    Import {
         file: PathBuf,
+        /// Open the book immediately after importing it.
+        #[arg(long)]
+        open: bool,
     },
     List,
     Open {
@@ -138,6 +143,30 @@ mod tests {
         };
         assert_eq!(book, "abc123");
         assert_eq!(label, "good part");
+    }
+
+    #[test]
+    fn parses_import_command() {
+        let cli = Cli::parse_from(["reader", "import", "book.epub", "--open"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Import {
+                ref file,
+                open: true
+            }) if file == &PathBuf::from("book.epub")
+        ));
+    }
+
+    #[test]
+    fn add_is_a_visible_import_alias() {
+        let cli = Cli::parse_from(["reader", "add", "book.txt"]);
+        assert!(matches!(
+            cli.command,
+            Some(Command::Import {
+                ref file,
+                open: false
+            }) if file == &PathBuf::from("book.txt")
+        ));
     }
 
     #[test]
