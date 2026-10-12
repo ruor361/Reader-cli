@@ -6,10 +6,10 @@ use anyhow::{bail, Context, Result};
 use clap::Parser;
 use reader::book::load_book;
 use reader::bookshelf;
-use reader::cli::{BookmarkCommand, Cli, Command, ExportFormat, ShelfCommand};
+use reader::cli::{BookmarkCommand, Cli, Command, ExportFormat, NetworkCommand, ShelfCommand};
 use reader::config::ReaderConfig;
 use reader::reading_data::{ReadingDataStore, ReadingEvent};
-use reader::shelf::{run_shelf, ShelfOutcome};
+use reader::shelf::{run_shelf_with_notice, ShelfOutcome};
 use reader::storage::{LibraryBook, Store};
 use reader::tui::run_reader;
 use unicode_width::UnicodeWidthStr;
@@ -26,8 +26,15 @@ fn main() -> ExitCode {
 
 fn run() -> Result<()> {
     let cli = Cli::parse();
-    let mut store = Store::open_default()?;
     let mut config = ReaderConfig::open_default()?;
+    if let Some(Command::Network {
+        command: Some(command),
+    }) = cli.command.as_ref()
+    {
+        // Connection management and remote listing do not need to touch local reading data.
+        return run_network_command(&mut config, command);
+    }
+    let mut store = Store::open_default()?;
     synchronize_reading_data(&mut store, &config)?;
 
     match cli.command {
@@ -40,16 +47,18 @@ fn run() -> Result<()> {
         Some(Command::List) => {
             print_library_table(&store);
         }
+        Some(Command::Network { command }) => match command {
+            Some(command) => run_network_command(&mut config, &command)?,
+            None => run_bookshelves(&mut store, &mut config, true)?,
+        },
         Some(Command::Refresh { dir }) => {
             refresh_bookshelf(&mut store, &mut config, dir)?;
         }
         Some(Command::Shelf { command }) => match command {
-            None => loop {
-                match run_shelf(&mut store, &mut config, None)? {
-                    ShelfOutcome::Exit => break,
-                    ShelfOutcome::Open(book) => open_book_in_reader(book, &mut store, &mut config)?,
-                }
-            },
+            None => {
+                let network = config.network_library.enabled;
+                run_bookshelves(&mut store, &mut config, network)?;
+            }
             Some(ShelfCommand::Refresh { dir }) => {
                 refresh_bookshelf(&mut store, &mut config, dir)?;
             }
@@ -171,6 +180,110 @@ fn run() -> Result<()> {
         }
     }
 
+    Ok(())
+}
+
+fn run_network_command(config: &mut ReaderConfig, command: &NetworkCommand) -> Result<()> {
+    match command {
+        NetworkCommand::Configure {
+            url,
+            username,
+            ca_certificate,
+            env_file,
+        } => {
+            let url = reader::network::server_url(url)?;
+            let env_file = env_file
+                .as_ref()
+                .map(|path| -> Result<PathBuf> {
+                    reader::network::validate_env_file(path)?;
+                    path.canonicalize()
+                        .context("Cannot resolve the .env connection file")
+                })
+                .transpose()?;
+            if let Some(path) = ca_certificate {
+                let pem = std::fs::read(path).context("Cannot read the private CA certificate")?;
+                if reqwest::Certificate::from_pem_bundle(&pem)?.is_empty() {
+                    bail!("The CA file contains no PEM certificates.");
+                }
+            }
+            config.network_library.url = Some(url.to_string());
+            if env_file.is_some() {
+                config.network_library.env_file = env_file;
+            }
+            if username.is_some() {
+                config.network_library.username = username.clone();
+            }
+            if let Some(path) = ca_certificate {
+                config.network_library.ca_certificate =
+                    Some(path.canonicalize().unwrap_or_else(|_| path.clone()));
+            }
+            config.save()?;
+            println!("Network library configured: {url}\nUse `reader shelf` and press w, or `reader network`. Passwords come from .env / environment variables or hidden input; they are never copied into configuration.json.");
+        }
+        NetworkCommand::Off => {
+            config.network_library.enabled = false;
+            config.save()?;
+            println!("Network view off. `reader shelf` will show local books.");
+        }
+        NetworkCommand::List => {
+            let client = reader::network::NetworkClient::connect(&config.network_library)?;
+            for book in client.books()? {
+                println!(
+                    "{}  {}  {}",
+                    book.format
+                        .map(|format| format.label())
+                        .unwrap_or("Unsupported"),
+                    book.title,
+                    book.author.as_deref().unwrap_or("-")
+                );
+            }
+        }
+    }
+    Ok(())
+}
+
+fn run_bookshelves(store: &mut Store, config: &mut ReaderConfig, mut network: bool) -> Result<()> {
+    let mut client = None;
+    let mut notice = None;
+    loop {
+        if network && client.is_none() {
+            match reader::network::NetworkClient::connect(&config.network_library) {
+                Ok(connection) => {
+                    client = Some(connection);
+                    config.network_library.enabled = true;
+                    config.save()?;
+                }
+                Err(err) => {
+                    notice = Some(format!("Network unavailable: {err:#}  [w] Retry"));
+                    network = false;
+                }
+            }
+        }
+        let outcome = if network {
+            reader::network_shelf::run_network_shelf(
+                store,
+                config,
+                client.as_ref().expect("connected network client"),
+            )?
+        } else {
+            run_shelf_with_notice(store, config, None, notice.take())?
+        };
+        match outcome {
+            ShelfOutcome::Exit => break,
+            ShelfOutcome::Open(book) => {
+                if let Err(err) = open_book_in_reader(book, store, config) {
+                    notice = Some(format!("Cannot open book: {err:#}"));
+                    network = false;
+                }
+            }
+            ShelfOutcome::Network => network = true,
+            ShelfOutcome::Local => {
+                network = false;
+                config.network_library.enabled = false;
+                config.save()?;
+            }
+        }
+    }
     Ok(())
 }
 

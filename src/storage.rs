@@ -789,6 +789,40 @@ impl ScanDirResult {
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn preserves_legacy_mobi_records_and_other_books_without_resetting_the_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("library.json");
+        let book = serde_json::json!({
+            "id": "old-mobi", "title": "Legacy book", "path": "old.mobi", "format": "Mobi",
+            "content_metrics": { "section_char_counts": [100] },
+            "progress": { "position": { "section_index": 0, "char_offset": 12 } },
+            "bookmarks": [{ "id": "mark", "label": "saved", "position": { "section_index": 0, "char_offset": 20 } }]
+        });
+        let mut other = book.clone();
+        other["id"] = "other-epub".into();
+        other["format"] = "Epub".into();
+        let library = serde_json::json!({ "schema_version": 3, "books": [book, other], "last_book_id": "old-mobi" });
+        std::fs::write(&path, serde_json::to_vec(&library).unwrap()).unwrap();
+        let store = Store::open(path.clone()).unwrap();
+        assert_eq!(store.library().books().len(), 2);
+        assert_eq!(
+            store.book_by_id("old-mobi").unwrap().format,
+            BookFormat::Mobi
+        );
+        assert_eq!(
+            store.progress_for("old-mobi").unwrap().position.char_offset,
+            12
+        );
+        assert_eq!(store.bookmarks_for("old-mobi")[0].position.char_offset, 20);
+        assert!(!path.with_extension("json.corrupt").exists());
+        store.save().unwrap();
+        let loaded = Store::open(path).unwrap();
+        assert_eq!(loaded.library().books().len(), 2);
+        assert_eq!(loaded.library().last_book_id.as_deref(), Some("old-mobi"));
+        assert!(crate::book::load_book("old.mobi").is_err());
+    }
     use crate::book::{BookMetadata, Section};
 
     fn document(id: &str, title: &str, path: PathBuf) -> BookDocument {

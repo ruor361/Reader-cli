@@ -4,6 +4,8 @@ pub mod bookshelf;
 pub mod cli;
 pub mod config;
 pub mod discreet;
+pub mod network;
+pub mod network_shelf;
 pub mod pagination;
 pub mod paths;
 #[deprecated(note = "use reader::discreet")]

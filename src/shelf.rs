@@ -19,6 +19,8 @@ use crate::ui::{
 pub enum ShelfOutcome {
     Exit,
     Open(LibraryBook),
+    Network,
+    Local,
 }
 
 const PROGRESS_BAR_WIDTH: usize = 5;
@@ -28,12 +30,24 @@ pub fn run_shelf(
     config: &mut ReaderConfig,
     scan_result: Option<ScanDirResult>,
 ) -> Result<ShelfOutcome> {
+    run_shelf_with_notice(store, config, scan_result, None)
+}
+
+pub fn run_shelf_with_notice(
+    store: &mut Store,
+    config: &mut ReaderConfig,
+    scan_result: Option<ScanDirResult>,
+    notice: Option<String>,
+) -> Result<ShelfOutcome> {
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
     let size = terminal.size()?;
     let viewport = Rect::new(0, 0, size.width, size.height);
 
     let mut app = ShelfApp::new(store, viewport, scan_result);
+    if let Some(notice) = notice {
+        app.message = notice;
+    }
 
     let outcome = loop {
         terminal.draw(|frame| draw(frame, &app, store, config))?;
@@ -269,6 +283,7 @@ enum ShelfCommandUi {
     Resume,
     Help,
     Quit,
+    Network,
 }
 
 const OPEN_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Enter)];
@@ -300,6 +315,16 @@ const QUIT_KEYS: &[KeyChord] = &[
 ];
 
 const SHELF_BINDINGS: &[KeyBinding<ShelfCommandUi>] = &[
+    KeyBinding {
+        command: ShelfCommandUi::Network,
+        chords: &[KeyChord::plain(KeyCode::Char('w'))],
+        keys: "w",
+        hud_keys: "w",
+        label: "Network bookshelf",
+        short_label: "Network",
+        show_in_hud: true,
+        hud_priority: 0,
+    },
     KeyBinding {
         command: ShelfCommandUi::Open,
         chords: OPEN_KEYS,
@@ -478,6 +503,7 @@ fn handle_browse_key(
     config: &mut ReaderConfig,
 ) -> Result<Option<ShelfOutcome>> {
     match command_for(SHELF_BINDINGS, key) {
+        Some(ShelfCommandUi::Network) => return Ok(Some(ShelfOutcome::Network)),
         Some(ShelfCommandUi::Quit) => return Ok(Some(ShelfOutcome::Exit)),
         Some(ShelfCommandUi::Next) => app.move_selection(1),
         Some(ShelfCommandUi::Previous) => app.move_selection(-1),
@@ -1080,6 +1106,24 @@ mod tests {
             ),
             Some(ShelfCommandUi::Import)
         );
+    }
+
+    #[test]
+    fn network_toggle_returns_to_dispatch_without_modifying_local_library() {
+        let dir = tempfile::tempdir().unwrap();
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        let mut config = ReaderConfig::default();
+        let mut app = ShelfApp::new(&store, Rect::new(0, 0, 80, 24), None);
+        let outcome = handle_key(
+            KeyEvent::new(KeyCode::Char('w'), KeyModifiers::NONE),
+            &mut app,
+            &mut store,
+            &mut config,
+        )
+        .unwrap();
+        assert!(matches!(outcome, Some(ShelfOutcome::Network)));
+        assert!(store.library().books().is_empty());
+        assert!(config.bookshelf_dir.is_none());
     }
 
     #[test]

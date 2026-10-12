@@ -14,6 +14,9 @@ pub enum BookFormat {
     Epub,
     Txt,
     Pdf,
+    /// Retained for compatibility with libraries produced by older local builds.
+    /// MOBI parsing is unavailable; keep its progress/bookmarks until conversion.
+    Mobi,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -232,6 +235,7 @@ impl BookFormat {
             BookFormat::Epub => "EPUB",
             BookFormat::Txt => "TXT",
             BookFormat::Pdf => "PDF",
+            BookFormat::Mobi => "MOBI",
         }
     }
 
@@ -240,6 +244,7 @@ impl BookFormat {
             BookFormat::Epub => "Chapter",
             BookFormat::Txt => "Section",
             BookFormat::Pdf => "Page",
+            BookFormat::Mobi => "Section",
         }
     }
 
@@ -248,6 +253,7 @@ impl BookFormat {
             BookFormat::Epub => "Chapters",
             BookFormat::Txt => "Sections",
             BookFormat::Pdf => "Pages",
+            BookFormat::Mobi => "Sections",
         }
     }
 }

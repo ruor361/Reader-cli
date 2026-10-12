@@ -1,6 +1,7 @@
 # Rust build output
 /target/
 /target-*/
+/reader.exe
 **/*.rs.bk
 
 # IDE and editor-local files
@@ -20,3 +21,8 @@ Desktop.ini
 
 # Local sample library and generated sidecars
 /Liberal/
+
+# Local connection secrets
+.env
+.env.*
+!.env.example

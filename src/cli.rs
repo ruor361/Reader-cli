@@ -34,6 +34,11 @@ pub enum Command {
         open: bool,
     },
     List,
+    /// Browse or configure a Calibre-Web OPDS bookshelf.
+    Network {
+        #[command(subcommand)]
+        command: Option<NetworkCommand>,
+    },
     Open {
         book: String,
     },
@@ -70,6 +75,25 @@ pub enum Command {
         #[command(subcommand)]
         command: Option<ShelfCommand>,
     },
+}
+
+#[derive(Debug, Subcommand)]
+pub enum NetworkCommand {
+    /// Save the server address and optional username / private CA (never a password).
+    Configure {
+        url: String,
+        #[arg(long)]
+        username: Option<String>,
+        #[arg(long)]
+        ca_certificate: Option<PathBuf>,
+        /// Use this .env credential file from any working directory.
+        #[arg(long)]
+        env_file: Option<PathBuf>,
+    },
+    /// Start the shelf with the local library again.
+    Off,
+    /// Print remote books without starting the TUI (prompts for login if needed).
+    List,
 }
 
 #[derive(Debug, Subcommand)]
@@ -207,6 +231,36 @@ mod tests {
         assert!(matches!(
             cli.command,
             Some(Command::Shelf { command: None })
+        ));
+    }
+
+    #[test]
+    fn parses_network_configuration_and_switch_commands() {
+        let cli = Cli::parse_from([
+            "reader",
+            "network",
+            "configure",
+            "https://books.example",
+            "--username",
+            "me",
+            "--ca-certificate",
+            "root.pem",
+            "--env-file",
+            "connection.env",
+        ]);
+        assert!(
+            matches!(cli.command, Some(Command::Network { command: Some(NetworkCommand::Configure { ref url, ref username, ref ca_certificate, ref env_file }) })
+            if url == "https://books.example" && username.as_deref() == Some("me") && ca_certificate.as_deref() == Some(std::path::Path::new("root.pem")) && env_file.as_deref() == Some(std::path::Path::new("connection.env")))
+        );
+        assert!(matches!(
+            Cli::parse_from(["reader", "network", "off"]).command,
+            Some(Command::Network {
+                command: Some(NetworkCommand::Off)
+            })
+        ));
+        assert!(matches!(
+            Cli::parse_from(["reader", "network"]).command,
+            Some(Command::Network { command: None })
         ));
     }
 

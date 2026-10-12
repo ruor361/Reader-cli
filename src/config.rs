@@ -14,6 +14,8 @@ pub struct ReaderConfig {
     /// sibling `*.json` sidecar. `reader shelf refresh` reconciles the
     /// directory contents, sidecars, and `library.json`.
     pub bookshelf_dir: Option<PathBuf>,
+    /// Optional Calibre-Web / Calibre-Web Automated OPDS connection.
+    pub network_library: NetworkLibraryConfig,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -27,9 +29,22 @@ impl Default for ReaderConfig {
             text_width: None,
             library_dirs: Vec::new(),
             bookshelf_dir: None,
+            network_library: NetworkLibraryConfig::default(),
             path: None,
         }
     }
+}
+
+#[derive(Debug, Clone, Default, serde::Serialize, serde::Deserialize)]
+#[serde(default)]
+pub struct NetworkLibraryConfig {
+    pub enabled: bool,
+    pub url: Option<String>,
+    pub username: Option<String>,
+    /// Explicit local credential file, so an installed executable works from any directory.
+    pub env_file: Option<PathBuf>,
+    /// Additional trusted PEM CA certificate for a private HTTPS server.
+    pub ca_certificate: Option<PathBuf>,
 }
 
 impl ReaderConfig {
@@ -96,6 +111,7 @@ struct ReaderConfigWire {
     text_width: Option<u16>,
     library_dirs: Vec<PathBuf>,
     bookshelf_dir: Option<PathBuf>,
+    network_library: NetworkLibraryConfig,
 }
 
 impl Default for ReaderConfigWire {
@@ -109,6 +125,7 @@ impl Default for ReaderConfigWire {
             text_width: config.text_width,
             library_dirs: config.library_dirs,
             bookshelf_dir: config.bookshelf_dir,
+            network_library: config.network_library,
         }
     }
 }
@@ -126,6 +143,7 @@ impl<'de> serde::Deserialize<'de> for ReaderConfig {
             text_width: wire.text_width,
             library_dirs: wire.library_dirs,
             bookshelf_dir: wire.bookshelf_dir,
+            network_library: wire.network_library,
             path: None,
         })
     }
@@ -220,5 +238,37 @@ mod tests {
         let serialized = serde_json::to_value(config).unwrap();
 
         assert!(serialized.get("theme").is_none());
+    }
+
+    #[test]
+    fn network_settings_round_trip_without_a_password_field() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configuration.json");
+        let mut config = ReaderConfig::open(path.clone()).unwrap();
+        config.network_library.enabled = true;
+        config.network_library.url = Some("https://books.example/opds".into());
+        config.network_library.username = Some("reader".into());
+        config.network_library.env_file = Some(PathBuf::from("connection.env"));
+        config.network_library.ca_certificate = Some(PathBuf::from("root.pem"));
+        config.save().unwrap();
+        let loaded = ReaderConfig::open(path.clone()).unwrap();
+        assert!(loaded.network_library.enabled);
+        assert_eq!(loaded.network_library.url, config.network_library.url);
+        assert_eq!(
+            loaded.network_library.username,
+            config.network_library.username
+        );
+        assert_eq!(
+            loaded.network_library.env_file,
+            config.network_library.env_file
+        );
+        assert_eq!(
+            loaded.network_library.ca_certificate,
+            config.network_library.ca_certificate
+        );
+        assert!(!std::fs::read_to_string(path).unwrap().contains("password"));
+        let legacy: ReaderConfig = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.network_library.enabled);
+        assert!(legacy.network_library.url.is_none());
     }
 }
