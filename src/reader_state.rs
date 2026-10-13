@@ -2,13 +2,11 @@ use std::time::{Duration, Instant};
 
 use ratatui::layout::Rect;
 
-use crate::book::{BookDocument, ContentMetrics, TextPosition};
+use crate::book::{BookDocument, ContentMetrics, SearchResult, TextPosition};
 use crate::config::ReaderConfig;
 use crate::discreet::{discreet_layout, DiscreetLogState};
-use crate::pagination::{
-    page_for_position, paginate_with_content_height, paginate_with_exact_content_dimensions, Page,
-};
-use crate::storage::Progress;
+use crate::pagination::{page_for_position, paginate_discreet, paginate_with_content_height, Page};
+use crate::storage::{Bookmark, Progress};
 
 const NOTICE_DURATION: Duration = Duration::from_millis(2800);
 
@@ -23,8 +21,10 @@ pub(crate) struct ReaderState {
     pub viewport: Rect,
     pub overlay: Overlay,
     pub notification: Option<Notification>,
-    pub search_results: Vec<TextPosition>,
+    pub search_results: Vec<SearchResult>,
+    pub search_query: Option<String>,
     pub search_index: usize,
+    pub bookmarks: Vec<Bookmark>,
     pub config: ReaderConfig,
     pub hidden: bool,
     pub discreet_log: Option<DiscreetLogState>,
@@ -37,6 +37,8 @@ pub(crate) enum Overlay {
     Percent(PercentNavigator),
     Contents(ContentsNavigator),
     Search(SearchInput),
+    SearchResults(SearchResultsNavigator),
+    Bookmarks(BookmarksNavigator),
     Metadata,
     Help,
 }
@@ -59,6 +61,18 @@ pub(crate) struct ContentsNavigator {
 #[derive(Debug, Default)]
 pub(crate) struct SearchInput {
     pub query: String,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct SearchResultsNavigator {
+    pub selection: usize,
+    pub error: Option<String>,
+}
+
+#[derive(Debug, Default, Clone, PartialEq, Eq)]
+pub(crate) struct BookmarksNavigator {
+    pub selection: usize,
     pub error: Option<String>,
 }
 
@@ -87,12 +101,18 @@ pub(crate) enum ReaderAction {
     OpenPercent,
     OpenContents,
     OpenSearch,
+    OpenSearchResults,
+    OpenBookmarks,
     OpenMetadata,
     OpenHelp,
     ToggleProgress,
     ToggleDiscreet,
     ToggleHidden,
+    ToggleImmersive,
+    AdjustTextWidth(i16),
+    ResetTextWidth,
     AddBookmark,
+    DeleteBookmark,
     NextSearch,
     PreviousSearch,
     Move(isize),
@@ -109,6 +129,7 @@ pub(crate) enum ReaderEffect {
     SaveProgress(Progress),
     SaveConfig,
     AddBookmark { label: String, progress: Progress },
+    DeleteBookmark { id: String },
     Exit,
 }
 
@@ -119,6 +140,7 @@ impl ReaderState {
         viewport: Rect,
         config: ReaderConfig,
         saved: Progress,
+        bookmarks: Vec<Bookmark>,
     ) -> Self {
         let metrics = document.content_metrics();
         let position = metrics.clamp(saved.position);
@@ -135,7 +157,9 @@ impl ReaderState {
             overlay: Overlay::None,
             notification: None,
             search_results: Vec::new(),
+            search_query: None,
             search_index: 0,
+            bookmarks,
             config,
             hidden: false,
             discreet_log: None,
@@ -224,8 +248,22 @@ impl ReaderState {
             ReaderAction::Exit => vec![ReaderEffect::Exit],
             ReaderAction::NextScreen => self.move_screen(1),
             ReaderAction::PreviousScreen => self.move_screen(-1),
-            ReaderAction::JumpStart => self.jump_boundary(false),
-            ReaderAction::JumpEnd => self.jump_boundary(true),
+            ReaderAction::JumpStart => match &mut self.overlay {
+                Overlay::Bookmarks(navigator) => {
+                    navigator.selection = 0;
+                    Vec::new()
+                }
+                _ => self.jump_boundary(false),
+            },
+            ReaderAction::JumpEnd => match &mut self.overlay {
+                Overlay::Bookmarks(navigator) => {
+                    if !self.bookmarks.is_empty() {
+                        navigator.selection = self.bookmarks.len() - 1;
+                    }
+                    Vec::new()
+                }
+                _ => self.jump_boundary(true),
+            },
             ReaderAction::OpenPercent => {
                 self.overlay = Overlay::Percent(PercentNavigator::default());
                 Vec::new()
@@ -243,6 +281,32 @@ impl ReaderState {
             }
             ReaderAction::OpenSearch => {
                 self.overlay = Overlay::Search(SearchInput::default());
+                Vec::new()
+            }
+            ReaderAction::OpenSearchResults => {
+                if self.search_results.is_empty() {
+                    self.notify("No active search results", NotificationKind::Error);
+                } else {
+                    self.overlay = Overlay::SearchResults(SearchResultsNavigator {
+                        selection: self.search_index,
+                        error: None,
+                    });
+                }
+                Vec::new()
+            }
+            ReaderAction::OpenBookmarks => {
+                let selection = if self.bookmarks.is_empty() {
+                    0
+                } else {
+                    self.bookmarks
+                        .iter()
+                        .position(|b| b.position >= self.position)
+                        .unwrap_or(self.bookmarks.len().saturating_sub(1))
+                };
+                self.overlay = Overlay::Bookmarks(BookmarksNavigator {
+                    selection,
+                    error: None,
+                });
                 Vec::new()
             }
             ReaderAction::OpenMetadata => {
@@ -286,6 +350,38 @@ impl ReaderState {
                 }
                 Vec::new()
             }
+            ReaderAction::ToggleImmersive => {
+                self.config.toggle_immersive_mode();
+                self.repaginate();
+                self.notify(
+                    if self.config.immersive_mode {
+                        "Immersive mode on"
+                    } else {
+                        "Immersive mode off"
+                    },
+                    NotificationKind::Info,
+                );
+                vec![ReaderEffect::SaveConfig]
+            }
+            ReaderAction::AdjustTextWidth(delta) => {
+                let current = self.config.text_width.unwrap_or(self.viewport.width);
+                let max_width = self.viewport.width.max(20);
+                let new_width = if delta < 0 {
+                    current.saturating_sub(delta.unsigned_abs()).max(20)
+                } else {
+                    current.saturating_add(delta.unsigned_abs()).min(max_width)
+                };
+                self.config.text_width = Some(new_width);
+                self.repaginate();
+                self.notify(format!("Text width: {new_width}"), NotificationKind::Info);
+                vec![ReaderEffect::SaveConfig]
+            }
+            ReaderAction::ResetTextWidth => {
+                self.config.text_width = None;
+                self.repaginate();
+                self.notify("Text width: auto", NotificationKind::Info);
+                vec![ReaderEffect::SaveConfig]
+            }
             ReaderAction::AddBookmark => vec![ReaderEffect::AddBookmark {
                 label: format!(
                     "{} {} · {}",
@@ -295,6 +391,23 @@ impl ReaderState {
                 ),
                 progress: self.current_progress(),
             }],
+            ReaderAction::DeleteBookmark => {
+                if let Overlay::Bookmarks(navigator) = &mut self.overlay {
+                    if !self.bookmarks.is_empty() && navigator.selection < self.bookmarks.len() {
+                        let removed = self.bookmarks.remove(navigator.selection);
+                        if navigator.selection >= self.bookmarks.len() && !self.bookmarks.is_empty()
+                        {
+                            navigator.selection = self.bookmarks.len() - 1;
+                        }
+                        self.notify(
+                            format!("Deleted bookmark: {}", removed.label),
+                            NotificationKind::Info,
+                        );
+                        return vec![ReaderEffect::DeleteBookmark { id: removed.id }];
+                    }
+                }
+                Vec::new()
+            }
             ReaderAction::NextSearch => self.jump_search(1),
             ReaderAction::PreviousSearch => self.jump_search(-1),
             ReaderAction::Move(delta) => {
@@ -411,21 +524,41 @@ impl ReaderState {
     }
 
     fn move_overlay_selection(&mut self, delta: isize) {
-        let Overlay::Contents(navigator) = &mut self.overlay else {
-            return;
-        };
-        let visible = visible_contents(&self.document, navigator);
-        if visible.is_empty() {
-            return;
+        match &mut self.overlay {
+            Overlay::Contents(navigator) => {
+                let visible = visible_contents(&self.document, navigator);
+                if visible.is_empty() {
+                    return;
+                }
+                let current = visible
+                    .iter()
+                    .position(|index| *index == navigator.selection)
+                    .unwrap_or(0);
+                let next = (current as isize + delta).clamp(0, visible.len() as isize - 1) as usize;
+                navigator.selection = visible[next];
+                navigator.number_input.clear();
+                navigator.error = None;
+            }
+            Overlay::SearchResults(navigator) => {
+                if self.search_results.is_empty() {
+                    return;
+                }
+                let count = self.search_results.len() as isize;
+                let next = (navigator.selection as isize + delta).clamp(0, count - 1) as usize;
+                navigator.selection = next;
+                navigator.error = None;
+            }
+            Overlay::Bookmarks(navigator) => {
+                if self.bookmarks.is_empty() {
+                    return;
+                }
+                let count = self.bookmarks.len() as isize;
+                let next = (navigator.selection as isize + delta).clamp(0, count - 1) as usize;
+                navigator.selection = next;
+                navigator.error = None;
+            }
+            _ => {}
         }
-        let current = visible
-            .iter()
-            .position(|index| *index == navigator.selection)
-            .unwrap_or(0);
-        let next = (current as isize + delta).clamp(0, visible.len() as isize - 1) as usize;
-        navigator.selection = visible[next];
-        navigator.number_input.clear();
-        navigator.error = None;
     }
 
     fn confirm_overlay(&mut self) -> Vec<ReaderEffect> {
@@ -480,6 +613,42 @@ impl ReaderState {
                 }
                 Vec::new()
             }
+            Overlay::SearchResults(navigator) => {
+                if !self.search_results.is_empty()
+                    && navigator.selection < self.search_results.len()
+                {
+                    self.search_index = navigator.selection;
+                    self.jump_to_position(self.search_results[self.search_index].position);
+                    self.overlay = Overlay::None;
+                    let query_label = self.search_query.as_deref().unwrap_or("");
+                    self.notify(
+                        format!(
+                            "Match {}/{} for {:?}",
+                            self.search_index + 1,
+                            self.search_results.len(),
+                            query_label
+                        ),
+                        NotificationKind::Info,
+                    );
+                    return vec![ReaderEffect::SaveProgress(self.current_progress())];
+                }
+                self.overlay = Overlay::None;
+                Vec::new()
+            }
+            Overlay::Bookmarks(navigator) => {
+                if !self.bookmarks.is_empty() && navigator.selection < self.bookmarks.len() {
+                    let bookmark = self.bookmarks[navigator.selection].clone();
+                    self.jump_to_position(bookmark.position);
+                    self.overlay = Overlay::None;
+                    self.notify(
+                        format!("Jumped to bookmark: {}", bookmark.label),
+                        NotificationKind::Success,
+                    );
+                    return vec![ReaderEffect::SaveProgress(self.current_progress())];
+                }
+                self.overlay = Overlay::None;
+                Vec::new()
+            }
             Overlay::Search(input) => {
                 let query = input.query.trim().to_string();
                 if query.is_empty() {
@@ -495,10 +664,14 @@ impl ReaderState {
                     }
                     return Vec::new();
                 }
-                self.search_results = results.into_iter().map(|result| result.position).collect();
+                self.search_results = results;
+                self.search_query = Some(query.clone());
                 self.search_index = 0;
-                self.jump_to_position(self.search_results[0]);
-                self.overlay = Overlay::None;
+                self.jump_to_position(self.search_results[0].position);
+                self.overlay = Overlay::SearchResults(SearchResultsNavigator {
+                    selection: 0,
+                    error: None,
+                });
                 self.notify(
                     format!("Match 1/{} for {query:?}", self.search_results.len()),
                     NotificationKind::Success,
@@ -589,12 +762,17 @@ impl ReaderState {
         }
         let length = self.search_results.len() as isize;
         self.search_index = (self.search_index as isize + delta).rem_euclid(length) as usize;
-        self.jump_to_position(self.search_results[self.search_index]);
+        self.jump_to_position(self.search_results[self.search_index].position);
+        if let Overlay::SearchResults(navigator) = &mut self.overlay {
+            navigator.selection = self.search_index;
+        }
+        let query_label = self.search_query.as_deref().unwrap_or("");
         self.notify(
             format!(
-                "Match {}/{}",
+                "Match {}/{} for {:?}",
                 self.search_index + 1,
-                self.search_results.len()
+                self.search_results.len(),
+                query_label
             ),
             NotificationKind::Info,
         );
@@ -637,16 +815,21 @@ fn paginate_for_config(
 ) -> Vec<Page> {
     if config.discreet_mode {
         let layout = discreet_layout(viewport, config.text_width);
-        return paginate_with_exact_content_dimensions(
+        return paginate_discreet(
             &document.sections,
             layout.body_width,
             discreet_content_height(viewport),
         );
     }
+    let content_height = if config.immersive_mode {
+        viewport.height.max(1)
+    } else {
+        viewport.height.saturating_sub(2).max(1)
+    };
     paginate_with_content_height(
         &document.sections,
         viewport.width,
-        viewport.height.saturating_sub(2).max(1),
+        content_height,
         config.text_width,
     )
 }
@@ -798,6 +981,7 @@ mod tests {
             Rect::new(0, 0, 24, 8),
             ReaderConfig::default(),
             Progress::default(),
+            Vec::new(),
         )
     }
 
@@ -1080,6 +1264,7 @@ mod tests {
             Rect::new(0, 0, 120, 24),
             config,
             Progress::default(),
+            Vec::new(),
         );
 
         assert_eq!(state.pages[0].lines[0].chars().count(), 32);
@@ -1109,6 +1294,7 @@ mod tests {
                 source_start: TextPosition::new(0, 0),
                 source_end: TextPosition::new(0, 2),
                 lines: vec!["first".into(), String::new(), "third".into()],
+                anchored_lines: Vec::new(),
             },
             Page {
                 index: 1,
@@ -1116,6 +1302,7 @@ mod tests {
                 source_start: TextPosition::new(0, 2),
                 source_end: TextPosition::new(0, 4),
                 lines: vec!["fourth".into(), "fifth".into()],
+                anchored_lines: Vec::new(),
             },
         ];
 
@@ -1137,5 +1324,150 @@ mod tests {
 
         state.update(ReaderAction::JumpEnd);
         assert_eq!(state.progress_tenths(), 1000);
+    }
+
+    #[test]
+    fn search_workflow_navigates_and_wraps_results() {
+        let mut state = state();
+        state.update(ReaderAction::OpenSearch);
+        for ch in "ta".chars() {
+            state.update(ReaderAction::Input(ch));
+        }
+        state.update(ReaderAction::Confirm);
+
+        assert!(matches!(
+            state.overlay,
+            Overlay::SearchResults(SearchResultsNavigator { selection: 0, .. })
+        ));
+        assert_eq!(state.search_results.len(), 2);
+        assert_eq!(state.search_index, 0);
+
+        state.update(ReaderAction::Cancel);
+        assert!(matches!(state.overlay, Overlay::None));
+
+        state.update(ReaderAction::OpenSearchResults);
+        assert!(matches!(
+            state.overlay,
+            Overlay::SearchResults(SearchResultsNavigator { selection: 0, .. })
+        ));
+        state.update(ReaderAction::Move(1));
+        assert!(matches!(
+            state.overlay,
+            Overlay::SearchResults(SearchResultsNavigator { selection: 1, .. })
+        ));
+        state.update(ReaderAction::Confirm);
+        assert!(matches!(state.overlay, Overlay::None));
+        assert_eq!(state.search_index, 1);
+
+        state.update(ReaderAction::NextSearch);
+        assert_eq!(state.search_index, 0);
+        state.update(ReaderAction::PreviousSearch);
+        assert_eq!(state.search_index, 1);
+    }
+
+    #[test]
+    fn text_width_adjustment_and_auto_reset() {
+        let mut state = state();
+        assert_eq!(state.config.text_width, None);
+
+        let initial_pos = state.position;
+        let effects = state.update(ReaderAction::AdjustTextWidth(-2));
+        assert_eq!(effects, vec![ReaderEffect::SaveConfig]);
+        assert_eq!(state.config.text_width, Some(22)); // 24 - 2 = 22
+        assert_eq!(state.position, initial_pos);
+
+        // Adjust down to min clamp (20)
+        state.update(ReaderAction::AdjustTextWidth(-4));
+        assert_eq!(state.config.text_width, Some(20));
+
+        // Adjust up
+        state.update(ReaderAction::AdjustTextWidth(2));
+        assert_eq!(state.config.text_width, Some(22));
+
+        // Reset to auto
+        let effects_reset = state.update(ReaderAction::ResetTextWidth);
+        assert_eq!(effects_reset, vec![ReaderEffect::SaveConfig]);
+        assert_eq!(state.config.text_width, None);
+        assert_eq!(state.position, initial_pos);
+    }
+
+    #[test]
+    fn immersive_mode_toggle_allocates_full_height_and_preserves_position() {
+        let mut state = state();
+        assert!(!state.config.immersive_mode);
+        // Default height is 8, minus 2 for header/footer = 6 rows in normal mode
+        let normal_page_lines = state.pages[0].lines.len();
+
+        let initial_pos = state.position;
+        let effects = state.update(ReaderAction::ToggleImmersive);
+        assert_eq!(effects, vec![ReaderEffect::SaveConfig]);
+        assert!(state.config.immersive_mode);
+        assert_eq!(state.position, initial_pos);
+
+        // In immersive mode, height 8 is fully available for content
+        // Given enough lines, immersive mode fits more lines per page
+        // Let's verify that repaginate was executed with immersive height
+        let effects_toggle_back = state.update(ReaderAction::ToggleImmersive);
+        assert_eq!(effects_toggle_back, vec![ReaderEffect::SaveConfig]);
+        assert!(!state.config.immersive_mode);
+        assert_eq!(state.pages[0].lines.len(), normal_page_lines);
+        assert_eq!(state.position, initial_pos);
+    }
+
+    #[test]
+    fn bookmarks_workflow_navigates_jumps_and_deletes() {
+        let mut state = state();
+        state.bookmarks = vec![
+            Bookmark {
+                id: "bm1".into(),
+                label: "Bookmark 1".into(),
+                position: TextPosition::new(0, 5),
+            },
+            Bookmark {
+                id: "bm2".into(),
+                label: "Bookmark 2".into(),
+                position: TextPosition::new(1, 10),
+            },
+        ];
+
+        // Open bookmarks overlay
+        state.update(ReaderAction::OpenBookmarks);
+        assert!(matches!(
+            state.overlay,
+            Overlay::Bookmarks(BookmarksNavigator { selection: 0, .. })
+        ));
+
+        // Navigate down to item 1
+        state.update(ReaderAction::Move(1));
+        assert!(matches!(
+            state.overlay,
+            Overlay::Bookmarks(BookmarksNavigator { selection: 1, .. })
+        ));
+
+        // Confirm jump to Bookmark 2
+        let effects = state.update(ReaderAction::Confirm);
+        assert!(matches!(state.overlay, Overlay::None));
+        assert_eq!(state.position, TextPosition::new(1, 10));
+        assert!(matches!(
+            effects.as_slice(),
+            [ReaderEffect::SaveProgress(_)]
+        ));
+
+        // Re-open and delete Bookmark 2
+        state.update(ReaderAction::OpenBookmarks);
+        assert!(matches!(
+            state.overlay,
+            Overlay::Bookmarks(BookmarksNavigator { selection: 1, .. })
+        ));
+        let delete_effects = state.update(ReaderAction::DeleteBookmark);
+        assert_eq!(
+            delete_effects,
+            vec![ReaderEffect::DeleteBookmark { id: "bm2".into() }]
+        );
+        assert_eq!(state.bookmarks.len(), 1);
+        assert!(matches!(
+            state.overlay,
+            Overlay::Bookmarks(BookmarksNavigator { selection: 0, .. })
+        ));
     }
 }

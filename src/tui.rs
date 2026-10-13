@@ -41,8 +41,16 @@ pub fn run_reader(
 
     store.update_document_metrics(&book_id, &document);
     let saved = store.progress_for(&book_id).copied().unwrap_or_default();
+    let bookmarks = store.bookmarks_for(&book_id).to_vec();
     store.record_open(&book_id);
-    let mut state = ReaderState::new(document, book_id, viewport, config.clone(), saved);
+    let mut state = ReaderState::new(
+        document,
+        book_id,
+        viewport,
+        config.clone(),
+        saved,
+        bookmarks,
+    );
     let monotonic_now = Instant::now();
     let (mut session, initial_checkpoint) = SessionTracker::start(
         state.book_id.clone(),
@@ -154,6 +162,7 @@ fn apply_effects(
             ReaderEffect::AddBookmark { label, progress } => {
                 let bookmark = store.add_bookmark(&state.book_id, label, progress)?;
                 let warnings = data.append_bookmark_add(&state.book_id, &bookmark)?;
+                state.bookmarks.push(bookmark.clone());
                 state.notify(
                     if !warnings.is_empty() {
                         "Bookmark saved locally; cloud sync is pending".to_string()
@@ -168,6 +177,23 @@ fn apply_effects(
                     NotificationKind::Success,
                 );
                 persist_book_state(state, store)?;
+            }
+            ReaderEffect::DeleteBookmark { id } => {
+                if let Ok(removed) = store.delete_bookmark(&state.book_id, &id) {
+                    let warnings = data.append_bookmark_delete(&state.book_id, &removed.id)?;
+                    state.notify(
+                        if !warnings.is_empty() {
+                            "Bookmark deleted locally; cloud sync is pending".to_string()
+                        } else {
+                            format!(
+                                "Bookmark deleted: {}",
+                                removed.id.chars().take(12).collect::<String>()
+                            )
+                        },
+                        NotificationKind::Info,
+                    );
+                    persist_book_state(state, store)?;
+                }
             }
             ReaderEffect::Exit => exit = true,
         }

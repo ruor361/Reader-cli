@@ -1,21 +1,81 @@
-use unicode_width::{UnicodeWidthChar, UnicodeWidthStr};
+use unicode_linebreak::linebreaks;
+use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthStr;
 
 use crate::book::{ContentMetrics, Section, TextPosition};
 
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// UAX #14 换行算法所采用的 Unicode 版本 (major, minor, patch)
+pub const UNICODE_VERSION: (u8, u8, u8) = unicode_linebreak::UNICODE_VERSION;
+
+/// 格式化的 Unicode 版本字符串，例如 "15.0.0"
+pub fn unicode_version_str() -> String {
+    format!(
+        "{}.{}.{}",
+        UNICODE_VERSION.0, UNICODE_VERSION.1, UNICODE_VERSION.2
+    )
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct Page {
     pub index: usize,
     pub section_index: usize,
     pub source_start: TextPosition,
     pub source_end: TextPosition,
     pub lines: Vec<String>,
+    #[serde(default)]
+    pub anchored_lines: Vec<AnchoredLine>,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
 pub struct AnchoredLine {
     pub text: String,
     pub start_char: usize,
     pub end_char: usize,
+    #[serde(default)]
+    pub char_offsets: Vec<usize>,
+}
+
+impl AnchoredLine {
+    pub fn new(text: String, start_char: usize, end_char: usize, char_offsets: Vec<usize>) -> Self {
+        Self {
+            text,
+            start_char,
+            end_char,
+            char_offsets,
+        }
+    }
+
+    /// 该行显示文本在终端中的列宽
+    pub fn width(&self) -> usize {
+        self.text.width()
+    }
+
+    /// 由显示字符索引映射到原文 Unicode 字符偏移
+    pub fn display_to_source(&self, display_char_idx: usize) -> Option<usize> {
+        self.char_offsets.get(display_char_idx).copied()
+    }
+
+    /// 给定原文字符区间 [source_start, source_end)，返回本行内对应的显示字符切片范围 [display_start, display_end)
+    pub fn source_range_to_display(
+        &self,
+        source_start: usize,
+        source_end: usize,
+    ) -> Option<(usize, usize)> {
+        if self.char_offsets.is_empty() || source_start >= source_end {
+            return None;
+        }
+        let mut first = None;
+        let mut last = None;
+        for (i, &src_offset) in self.char_offsets.iter().enumerate() {
+            if src_offset >= source_start && src_offset < source_end {
+                if first.is_none() {
+                    first = Some(i);
+                }
+                last = Some(i + 1);
+            }
+        }
+        first.zip(last)
+    }
 }
 
 pub fn paginate(sections: &[Section], width: u16, height: u16) -> Vec<Page> {
@@ -46,7 +106,8 @@ pub fn paginate_with_content_height(
     )
 }
 
-pub(crate) fn paginate_with_exact_content_dimensions(
+#[cfg(test)]
+fn paginate_with_exact_content_dimensions(
     sections: &[Section],
     content_width: u16,
     content_height: u16,
@@ -58,7 +119,20 @@ pub(crate) fn paginate_with_exact_content_dimensions(
     )
 }
 
-fn resolved_content_width(width: u16, text_width: Option<u16>) -> usize {
+pub(crate) fn paginate_discreet(
+    sections: &[Section],
+    content_width: u16,
+    content_height: u16,
+) -> Vec<Page> {
+    paginate_with_layout(
+        sections,
+        usize::from(content_width.max(1)),
+        usize::from(content_height.max(1)),
+        true,
+    )
+}
+
+pub fn resolved_content_width(width: u16, text_width: Option<u16>) -> usize {
     let available = usize::from(width.saturating_sub(2).max(1));
     text_width
         .map(|value| usize::from(value.max(20)))
@@ -71,10 +145,19 @@ fn paginate_with_content_dimensions(
     content_width: usize,
     content_height: usize,
 ) -> Vec<Page> {
+    paginate_with_layout(sections, content_width, content_height, false)
+}
+
+fn paginate_with_layout(
+    sections: &[Section],
+    content_width: usize,
+    content_height: usize,
+    natural_breaks: bool,
+) -> Vec<Page> {
     let mut pages = Vec::new();
 
     for (section_index, section) in sections.iter().enumerate() {
-        let wrapped = wrap_text_anchored(&section.text, content_width);
+        let wrapped = wrap_text_with_layout(&section.text, content_width, natural_breaks);
         for chunk in wrapped.chunks(content_height.max(1)) {
             let start_char = chunk.first().map(|line| line.start_char).unwrap_or(0);
             let end_char = chunk.last().map(|line| line.end_char).unwrap_or(start_char);
@@ -84,6 +167,7 @@ fn paginate_with_content_dimensions(
                 source_start: TextPosition::new(section_index, start_char),
                 source_end: TextPosition::new(section_index, end_char),
                 lines: chunk.iter().map(|line| line.text.clone()).collect(),
+                anchored_lines: chunk.to_vec(),
             });
         }
     }
@@ -95,6 +179,7 @@ fn paginate_with_content_dimensions(
             source_start: TextPosition::default(),
             source_end: TextPosition::default(),
             lines: vec![String::new()],
+            anchored_lines: vec![AnchoredLine::default()],
         });
     }
 
@@ -140,108 +225,277 @@ pub fn wrap_text(text: &str, width: usize) -> Vec<String> {
 }
 
 pub fn wrap_text_anchored(text: &str, width: usize) -> Vec<AnchoredLine> {
+    wrap_text_with_layout(text, width, false)
+}
+
+fn wrap_text_with_layout(text: &str, width: usize, natural_breaks: bool) -> Vec<AnchoredLine> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut raw_start_char = 0;
 
     for raw_line in text.split('\n') {
         let raw_char_count = raw_line.chars().count();
+        if raw_line.is_empty() {
+            lines.push(AnchoredLine {
+                text: String::new(),
+                start_char: raw_start_char,
+                end_char: raw_start_char,
+                char_offsets: Vec::new(),
+            });
+            raw_start_char += 1;
+            continue;
+        }
+
         if raw_line.trim().is_empty() {
             lines.push(AnchoredLine {
                 text: String::new(),
                 start_char: raw_start_char,
                 end_char: raw_start_char + raw_char_count,
+                char_offsets: Vec::new(),
             });
             raw_start_char += raw_char_count + 1;
             continue;
         }
 
-        let mut current = String::new();
-        let mut current_start = raw_start_char;
-        let mut current_end = raw_start_char;
-        let mut search_byte = 0;
+        let char_positions: Vec<(usize, char)> = raw_line.char_indices().collect();
+        let mut prev_byte = 0;
+        let mut char_pos_idx = 0;
 
-        for word in raw_line.split_whitespace() {
-            let relative = raw_line[search_byte..].find(word).unwrap_or(0);
-            let word_byte_start = search_byte + relative;
-            let word_start = raw_start_char + raw_line[..word_byte_start].chars().count();
-            let word_end = word_start + word.chars().count();
-            search_byte = word_byte_start + word.len();
+        struct Segment<'a> {
+            text: &'a str,
+            char_offsets: Vec<usize>,
+            width: usize,
+            start_char: usize,
+            end_char: usize,
+        }
 
-            let pending_width = current.width() + usize::from(!current.is_empty()) + word.width();
-            if pending_width > width && !current.is_empty() {
-                push_line(&mut lines, &mut current, current_start, current_end);
+        let mut segments = Vec::new();
+        for (break_byte, _) in linebreaks(raw_line) {
+            if break_byte <= prev_byte {
+                continue;
             }
+            let seg_str = &raw_line[prev_byte..break_byte];
+            let start_char_in_line = char_pos_idx;
+            let mut seg_offsets = Vec::new();
+            while char_pos_idx < char_positions.len() && char_positions[char_pos_idx].0 < break_byte
+            {
+                seg_offsets.push(raw_start_char + char_pos_idx);
+                char_pos_idx += 1;
+            }
+            let end_char_in_line = char_pos_idx;
+            let seg_start_char = raw_start_char + start_char_in_line;
+            let seg_end_char = raw_start_char + end_char_in_line;
 
-            if word.width() > width {
-                if !current.is_empty() {
-                    push_line(&mut lines, &mut current, current_start, current_end);
+            segments.push(Segment {
+                text: seg_str,
+                char_offsets: seg_offsets,
+                width: seg_str.width(),
+                start_char: seg_start_char,
+                end_char: seg_end_char,
+            });
+            prev_byte = break_byte;
+        }
+
+        let mut current_text = String::new();
+        let mut current_offsets: Vec<usize> = Vec::new();
+        let mut current_width = 0;
+        let mut current_start_char = 0;
+        let mut current_end_char = 0;
+
+        for seg in segments {
+            let seg_trimmed = seg.text.trim_end_matches(' ');
+            let seg_trimmed_width = seg_trimmed.width();
+
+            // 如果连带空格都能完整放入当前行
+            if current_width + seg.width <= width {
+                if current_text.is_empty() {
+                    current_start_char = seg.start_char;
                 }
-                let remainder = split_oversized_word(word, word_start, width, &mut lines);
-                current = remainder.text;
-                current_start = remainder.start_char;
-                current_end = remainder.end_char;
+                current_text.push_str(seg.text);
+                current_offsets.extend(&seg.char_offsets);
+                current_width += seg.width;
+                current_end_char = seg.end_char;
+                // Only prefer legal UAX #14 boundaries near the right edge.
+                // Small windows keep the greedy layout to avoid very short lines.
+                if natural_breaks
+                    && width >= 24
+                    && current_width >= width - width / 8
+                    && ends_at_pause(&current_text)
+                {
+                    push_anchored_line(
+                        &mut lines,
+                        &mut current_text,
+                        &mut current_offsets,
+                        &mut current_width,
+                        current_start_char,
+                        current_end_char,
+                    );
+                }
                 continue;
             }
 
-            if current.is_empty() {
-                current_start = word_start;
-            } else {
-                current.push(' ');
+            // 如果去掉行末空格后恰好能放入当前行，则在行末悬挂折行
+            if current_width + seg_trimmed_width <= width {
+                if current_text.is_empty() {
+                    current_start_char = seg.start_char;
+                }
+                current_text.push_str(seg.text);
+                current_offsets.extend(&seg.char_offsets);
+                current_width += seg.width;
+                current_end_char = seg.end_char;
+                push_anchored_line(
+                    &mut lines,
+                    &mut current_text,
+                    &mut current_offsets,
+                    &mut current_width,
+                    current_start_char,
+                    current_end_char,
+                );
+                continue;
             }
-            current.push_str(word);
-            current_end = word_end;
+
+            // 当前行放不下，如果当前行已有内容，先提交当前行
+            if !current_text.is_empty() {
+                push_anchored_line(
+                    &mut lines,
+                    &mut current_text,
+                    &mut current_offsets,
+                    &mut current_width,
+                    current_start_char,
+                    current_end_char,
+                );
+            }
+
+            // 新行检查：整段（含空格）放得下
+            if seg.width <= width {
+                current_start_char = seg.start_char;
+                current_text.push_str(seg.text);
+                current_offsets.extend(&seg.char_offsets);
+                current_width = seg.width;
+                current_end_char = seg.end_char;
+                continue;
+            }
+
+            // 新行检查：去掉末尾空格后放得下
+            if seg_trimmed_width <= width {
+                current_start_char = seg.start_char;
+                current_text.push_str(seg.text);
+                current_offsets.extend(&seg.char_offsets);
+                current_width = seg.width;
+                current_end_char = seg.end_char;
+                push_anchored_line(
+                    &mut lines,
+                    &mut current_text,
+                    &mut current_offsets,
+                    &mut current_width,
+                    current_start_char,
+                    current_end_char,
+                );
+                continue;
+            }
+
+            // seg.width > width: 应急折行，按字形簇（Extended Grapheme Cluster）拆分
+            let mut g_char_cursor = 0;
+            for g_str in seg.text.graphemes(true) {
+                let g_chars_count = g_str.chars().count();
+                let g_offsets = &seg.char_offsets[g_char_cursor..g_char_cursor + g_chars_count];
+                g_char_cursor += g_chars_count;
+                let g_width = g_str.width();
+                let g_start = g_offsets.first().copied().unwrap_or(seg.start_char);
+                let g_end = g_offsets.last().map(|&x| x + 1).unwrap_or(g_start);
+
+                if current_width + g_width <= width {
+                    if current_text.is_empty() {
+                        current_start_char = g_start;
+                    }
+                    current_text.push_str(g_str);
+                    current_offsets.extend_from_slice(g_offsets);
+                    current_width += g_width;
+                    current_end_char = g_end;
+                } else {
+                    if !current_text.is_empty() {
+                        push_anchored_line(
+                            &mut lines,
+                            &mut current_text,
+                            &mut current_offsets,
+                            &mut current_width,
+                            current_start_char,
+                            current_end_char,
+                        );
+                    }
+                    current_start_char = g_start;
+                    current_text.push_str(g_str);
+                    current_offsets.extend_from_slice(g_offsets);
+                    current_width = g_width;
+                    current_end_char = g_end;
+
+                    if g_width >= width {
+                        push_anchored_line(
+                            &mut lines,
+                            &mut current_text,
+                            &mut current_offsets,
+                            &mut current_width,
+                            current_start_char,
+                            current_end_char,
+                        );
+                    }
+                }
+            }
         }
 
-        if !current.is_empty() {
-            push_line(&mut lines, &mut current, current_start, current_end);
+        if !current_text.is_empty() {
+            push_anchored_line(
+                &mut lines,
+                &mut current_text,
+                &mut current_offsets,
+                &mut current_width,
+                current_start_char,
+                current_end_char,
+            );
         }
+
         raw_start_char += raw_char_count + 1;
     }
 
     lines
 }
 
-fn push_line(lines: &mut Vec<AnchoredLine>, text: &mut String, start_char: usize, end_char: usize) {
-    lines.push(AnchoredLine {
-        text: std::mem::take(text),
-        start_char,
-        end_char,
-    });
+fn ends_at_pause(text: &str) -> bool {
+    let ending = text
+        .trim_end()
+        .trim_end_matches(['”', '’', '」', '』', '）', '"', '\'']);
+    ending.ends_with(['，', '。', '；', '：', '！', '？', '!', '?', ';'])
 }
 
-fn split_oversized_word(
-    word: &str,
-    word_start: usize,
-    width: usize,
+fn push_anchored_line(
     lines: &mut Vec<AnchoredLine>,
-) -> AnchoredLine {
-    let mut part = String::new();
-    let mut part_width = 0;
-    let mut part_start = word_start;
-    let mut part_end = word_start;
-
-    for (char_index, ch) in word.chars().enumerate() {
-        let char_width = ch.width().unwrap_or(0);
-        if part_width + char_width > width && !part.is_empty() {
-            lines.push(AnchoredLine {
-                text: std::mem::take(&mut part),
-                start_char: part_start,
-                end_char: part_end,
-            });
-            part_width = 0;
-            part_start = word_start + char_index;
-        }
-        part.push(ch);
-        part_width += char_width;
-        part_end = word_start + char_index + 1;
+    text: &mut String,
+    char_offsets: &mut Vec<usize>,
+    width: &mut usize,
+    start_char: usize,
+    end_char: usize,
+) {
+    if text.is_empty() && char_offsets.is_empty() {
+        return;
     }
+    let trimmed_len = text.trim_end_matches(' ').len();
+    let final_text = if trimmed_len > 0 && trimmed_len < text.len() {
+        let chars_to_keep = text[..trimmed_len].chars().count();
+        char_offsets.truncate(chars_to_keep);
+        text[..trimmed_len].to_string()
+    } else {
+        std::mem::take(text)
+    };
+    text.clear();
+    let offsets = std::mem::take(char_offsets);
+    *width = 0;
 
-    AnchoredLine {
-        text: part,
-        start_char: part_start,
-        end_char: part_end,
-    }
+    lines.push(AnchoredLine {
+        text: final_text,
+        start_char,
+        end_char,
+        char_offsets: offsets,
+    });
 }
 
 #[cfg(test)]
@@ -347,5 +601,248 @@ mod tests {
 
         assert_eq!(page_for_tenths(&pages, &metrics, 0), 0);
         assert_eq!(page_for_tenths(&pages, &metrics, 1000), pages.len() - 1);
+    }
+
+    #[test]
+    fn multiple_short_paragraphs_share_single_screen_within_section() {
+        let text = "Paragraph one.\n\nParagraph two.\n\nParagraph three.";
+        let sections = [Section {
+            title: "Chapter 1".into(),
+            text: text.into(),
+        }];
+        // width 40, content_height 10: 3个短段落应该在同一个 Page 内（Page 0）
+        let pages = paginate_with_exact_content_dimensions(&sections, 40, 10);
+        assert_eq!(pages.len(), 1);
+        assert!(pages[0].lines.iter().any(|l| l.contains("Paragraph one")));
+        assert!(pages[0].lines.iter().any(|l| l.contains("Paragraph two")));
+        assert!(pages[0].lines.iter().any(|l| l.contains("Paragraph three")));
+    }
+
+    #[test]
+    fn chapter_boundary_starts_new_page() {
+        let sections = [
+            Section {
+                title: "Chapter 1".into(),
+                text: "Short text in chapter 1".into(),
+            },
+            Section {
+                title: "Chapter 2".into(),
+                text: "Short text in chapter 2".into(),
+            },
+        ];
+        // 即使高度是 20，每一章都必须从新页开启
+        let pages = paginate_with_exact_content_dimensions(&sections, 40, 20);
+        assert_eq!(pages.len(), 2);
+        assert_eq!(pages[0].section_index, 0);
+        assert_eq!(pages[1].section_index, 1);
+    }
+
+    #[test]
+    fn long_paragraph_across_screens_has_no_omission_or_duplicate() {
+        let long_text = (0..20)
+            .map(|i| format!("Line {i} of content."))
+            .collect::<Vec<_>>()
+            .join("\n");
+        let sections = [Section {
+            title: "Long Chapter".into(),
+            text: long_text,
+        }];
+        // 每页 5 行
+        let pages = paginate_with_exact_content_dimensions(&sections, 40, 5);
+        assert_eq!(pages.len(), 4);
+        let mut reconstructed_lines = Vec::new();
+        for page in &pages {
+            reconstructed_lines.extend(page.lines.clone());
+        }
+        for i in 0..20 {
+            let needle = format!("Line {i} of content.");
+            assert_eq!(
+                reconstructed_lines.iter().filter(|l| l == &&needle).count(),
+                1
+            );
+        }
+    }
+
+    #[test]
+    fn cjk_punctuation_avoids_line_start_and_line_end() {
+        // 常规宽度下（能容纳最少 3 个全角字符 w >= 6），避头标点（逗号、句号、叹号、问号、右括号、右书名号）绝不出现在行首
+        let text = "你好，世界！真的吗？这是（测试）与《书名》。";
+        for w in 6..=40 {
+            let lines = wrap_text(text, w);
+            for line in &lines {
+                assert!(
+                    line.width() <= w,
+                    "Line '{}' width {} exceeds max {}",
+                    line,
+                    line.width(),
+                    w
+                );
+                let first_char = line.chars().next().unwrap_or(' ');
+                assert!(
+                    !['，', '。', '！', '？', '）', '》', '、'].contains(&first_char),
+                    "Line '{}' starts with prohibited head punctuation in width {}",
+                    line,
+                    w
+                );
+            }
+        }
+
+        // 避尾标点：开括号、开书名号不单独留在行末；闭书名号不单独留在行首
+        let text_tail = "书名《红楼梦》";
+        let lines_tail = wrap_text(text_tail, 4);
+        assert_eq!(lines_tail, ["书名", "《红", "楼", "梦》"]);
+        for line in &lines_tail {
+            let last_char = line.chars().last().unwrap_or(' ');
+            assert_ne!(
+                last_char, '《',
+                "Opening mark shouldn't end line if content wraps"
+            );
+            let first_char = line.chars().next().unwrap_or(' ');
+            assert_ne!(
+                first_char, '》',
+                "Closing mark shouldn't start line if content wraps"
+            );
+        }
+    }
+
+    #[test]
+    fn grapheme_clusters_and_composite_emoji_not_split() {
+        // 组合字符：e + combining acute accent
+        let accented = "Caf\u{0065}\u{0301} bar";
+        let lines = wrap_text_anchored(accented, 4);
+        // "Cafe\u{0301}" 作为一个词，宽度为 4，不能拆断组合音标
+        assert!(lines.iter().any(|l| l.text.contains("Caf\u{0065}\u{0301}")));
+
+        // 复合 Emoji 序列（家庭 Emoji）与国旗
+        let emoji_text = "嗨👨‍👩‍👧‍👦中国🇨🇳";
+        let emoji_lines = wrap_text_anchored(emoji_text, 4);
+        assert!(emoji_lines.iter().all(|l| l.width() <= 4));
+        // 验证复合 emoji 完整保留在同一行中，未被拆碎
+        assert!(emoji_lines.iter().any(|l| l.text.contains("👨‍👩‍👧‍👦")));
+        assert!(emoji_lines.iter().any(|l| l.text.contains("🇨🇳")));
+    }
+
+    #[test]
+    fn extremely_narrow_window_does_not_hang_or_panic() {
+        let text = "Supercalifragilisticexpialidocious 你好 👨‍👩‍👧‍👦 https://example.org/test";
+        for narrow_width in [1, 2, 3, 5] {
+            let lines = wrap_text_anchored(text, narrow_width);
+            assert!(!lines.is_empty());
+            for line in &lines {
+                assert_eq!(line.text.chars().count(), line.char_offsets.len());
+            }
+        }
+    }
+
+    #[test]
+    fn bidirectional_char_mapping_accurate() {
+        let text = "Hello 世界！ Welcome to 阅读器。";
+        let lines = wrap_text_anchored(text, 12);
+        let raw_chars: Vec<char> = text.chars().collect();
+
+        for line in &lines {
+            assert_eq!(line.text.chars().count(), line.char_offsets.len());
+            // 每一个显示字符都能准确在原文中映射到同一个字符
+            for (display_idx, &source_offset) in line.char_offsets.iter().enumerate() {
+                let display_char = line.text.chars().nth(display_idx).unwrap();
+                let source_char = raw_chars[source_offset];
+                assert_eq!(display_char, source_char);
+                assert_eq!(line.display_to_source(display_idx), Some(source_offset));
+            }
+        }
+
+        // 测试区间映射 source_range_to_display
+        // 查找 "世界" 的原文偏移
+        let world_start = text.chars().position(|c| c == '世').unwrap();
+        let world_end = world_start + 2;
+        let mut matched = false;
+        for line in &lines {
+            if let Some((disp_start, disp_end)) =
+                line.source_range_to_display(world_start, world_end)
+            {
+                let slice: String = line
+                    .text
+                    .chars()
+                    .skip(disp_start)
+                    .take(disp_end - disp_start)
+                    .collect();
+                assert_eq!(slice, "世界");
+                matched = true;
+                break;
+            }
+        }
+        assert!(
+            matched,
+            "Should find '世界' display range in one of the lines"
+        );
+    }
+
+    #[test]
+    fn discreet_breaks_at_a_nearby_pause_and_preserves_source_mapping() {
+        let text = "甲".repeat(20) + "，乙丙丁戊己庚辛壬癸。";
+        let lines = wrap_text_with_layout(&text, 48, true);
+        assert!(lines[0].text.ends_with('，'));
+        assert_eq!(lines[0].width(), 42);
+        assert!(!wrap_text_anchored(&text, 48)[0].text.ends_with('，'));
+        assert_eq!(
+            lines
+                .iter()
+                .map(|line| line.text.as_str())
+                .collect::<String>(),
+            text
+        );
+        let source: Vec<char> = text.chars().collect();
+        for line in &lines {
+            assert!(line.width() <= 48);
+            for (display, ch) in line.text.chars().enumerate() {
+                assert_eq!(source[line.display_to_source(display).unwrap()], ch);
+            }
+        }
+    }
+
+    #[test]
+    fn discreet_keeps_early_pauses_dense_and_narrow_windows_greedy() {
+        let text = "雨停了。".to_owned() + &"甲".repeat(35);
+        assert_eq!(
+            wrap_text_with_layout(&text, 48, true),
+            wrap_text_anchored(&text, 48)
+        );
+        for width in 1..24 {
+            let mixed = "你好，e\u{301} 👨‍👩‍👧‍👦 world！再见。";
+            assert_eq!(
+                wrap_text_with_layout(mixed, width, true),
+                wrap_text_anchored(mixed, width)
+            );
+        }
+    }
+
+    #[test]
+    fn discreet_pagination_preserves_all_anchors_across_pages() {
+        let text = ("甲".repeat(20) + "，乙丙丁戊己庚辛壬癸。\n\n").repeat(5);
+        let pages = paginate_discreet(
+            &[Section {
+                title: "chapter".into(),
+                text: text.clone(),
+            }],
+            48,
+            2,
+        );
+        let expected = wrap_text_with_layout(&text, 48, true);
+        assert_eq!(
+            pages
+                .iter()
+                .flat_map(|p| p.anchored_lines.clone())
+                .collect::<Vec<_>>(),
+            expected
+        );
+        for page in &pages {
+            assert_eq!(page_for_position(&pages, page.source_start), page.index);
+        }
+    }
+
+    #[test]
+    fn records_unicode_version() {
+        assert_eq!(UNICODE_VERSION.0, 15);
+        assert!(!unicode_version_str().is_empty());
     }
 }

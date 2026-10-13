@@ -27,6 +27,8 @@ time = { version = "0.3.47", features = [
     "parsing",
     "serde-well-known",
 ] }
+unicode-linebreak = "0.1"
+unicode-segmentation = "1.13"
 unicode-width = "0.2"
 uuid = { version = "1", features = ["v4", "v5"] }
 zip = "8.6.0"

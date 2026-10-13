@@ -96,6 +96,16 @@ impl Palette {
             .add_modifier(Modifier::BOLD | Modifier::REVERSED)
     }
 
+    pub fn search_match_current(self) -> Style {
+        self.selected()
+    }
+
+    pub fn search_match_secondary(self) -> Style {
+        self.base()
+            .fg(self.accent)
+            .add_modifier(Modifier::UNDERLINED)
+    }
+
     pub fn popup(self) -> Style {
         self.base().fg(self.body)
     }

@@ -7,7 +7,11 @@ fn txt_book_library_progress_and_bookmarks_survive_reload() {
     let dir = tempfile::tempdir().unwrap();
     let book_path = dir.path().join("journey.txt");
     let store_path = dir.path().join("library.json");
-    std::fs::write(&book_path, "Opening page\n\nSecond page with a needle").unwrap();
+    std::fs::write(
+        &book_path,
+        "Chapter 1 Start\nOpening page\n\nChapter 2 Next\nSecond page with a needle",
+    )
+    .unwrap();
 
     let document = load_book(&book_path).unwrap();
     let mut store = Store::open(store_path.clone()).unwrap();
@@ -32,7 +36,11 @@ fn txt_book_library_progress_and_bookmarks_survive_reload() {
 fn loaded_txt_books_are_searchable() {
     let dir = tempfile::tempdir().unwrap();
     let book_path = dir.path().join("searchable.txt");
-    std::fs::write(&book_path, "Alpha\n\nBeta needle Gamma").unwrap();
+    std::fs::write(
+        &book_path,
+        "Chapter 1\nAlpha\n\nChapter 2\nBeta needle Gamma",
+    )
+    .unwrap();
 
     let document = load_book(&book_path).unwrap();
     let results = document.search("needle");

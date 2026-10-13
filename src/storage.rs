@@ -55,6 +55,12 @@ pub struct LibraryBook {
     pub missing: bool,
     #[serde(default)]
     pub bookmarks: Vec<Bookmark>,
+    #[serde(default = "default_parser_version")]
+    pub parser_version: u32,
+}
+
+fn default_parser_version() -> u32 {
+    1
 }
 
 impl LibraryBook {
@@ -136,6 +142,40 @@ impl Store {
         &self.library
     }
 
+    pub fn migrate_legacy_books(&mut self) -> bool {
+        let mut changed = false;
+        for book in &mut self.library.books {
+            if book.parser_version < crate::book::CURRENT_PARSER_VERSION && book.path.exists() {
+                if let Ok(document) = crate::book::load_book(&book.path) {
+                    let metrics = document.content_metrics();
+                    migrate_book_positions(book, &document);
+                    apply_metrics(book, metrics);
+                    changed = true;
+                } else {
+                    if let Ok(new_pos) = crate::book::migrate_position_for_book(
+                        book.format,
+                        &book.path,
+                        book.progress.position,
+                    ) {
+                        book.progress.position = new_pos;
+                    }
+                    for bookmark in &mut book.bookmarks {
+                        if let Ok(new_pos) = crate::book::migrate_position_for_book(
+                            book.format,
+                            &book.path,
+                            bookmark.position,
+                        ) {
+                            bookmark.position = new_pos;
+                        }
+                    }
+                    book.parser_version = crate::book::CURRENT_PARSER_VERSION;
+                    changed = true;
+                }
+            }
+        }
+        changed
+    }
+
     pub fn save(&self) -> Result<()> {
         let text = serde_json::to_string_pretty(&self.library)?;
         crate::atomic_file::write(&self.path, text.as_bytes())
@@ -173,6 +213,9 @@ impl Store {
             if book.author.is_none() {
                 book.author = author;
             }
+            if book.parser_version < crate::book::CURRENT_PARSER_VERSION {
+                migrate_book_positions(book, document);
+            }
             apply_metrics(book, content_metrics);
             return Ok(&self.library.books[index]);
         }
@@ -195,6 +238,9 @@ impl Store {
             if book.author.is_none() {
                 book.author = author;
             }
+            if book.parser_version < crate::book::CURRENT_PARSER_VERSION {
+                migrate_book_positions(book, document);
+            }
             apply_metrics(book, content_metrics);
             if self.library.last_book_id.as_deref() == Some(previous_id.as_str()) {
                 self.library.last_book_id = Some(document.id.clone());
@@ -213,6 +259,7 @@ impl Store {
             last_opened: None,
             missing: false,
             bookmarks: Vec::new(),
+            parser_version: crate::book::CURRENT_PARSER_VERSION,
         });
         Ok(self.library.books.last().expect("book was just inserted"))
     }
@@ -224,11 +271,14 @@ impl Store {
             .iter_mut()
             .find(|book| book.id == book_id)
         {
+            if book.parser_version < crate::book::CURRENT_PARSER_VERSION {
+                migrate_book_positions(book, document);
+            }
             apply_metrics(book, document.content_metrics());
         }
     }
 
-    pub fn restore_reading_state(&mut self, book_id: &str, restored: LibraryBook) {
+    pub fn restore_reading_state(&mut self, book_id: &str, mut restored: LibraryBook) {
         let Some(book) = self
             .library
             .books
@@ -240,6 +290,25 @@ impl Store {
         if book.author.is_none() {
             book.author = restored.author;
         }
+        if restored.parser_version < crate::book::CURRENT_PARSER_VERSION && book.path.exists() {
+            if let Ok(new_pos) = crate::book::migrate_position_for_book(
+                book.format,
+                &book.path,
+                restored.progress.position,
+            ) {
+                restored.progress.position = new_pos;
+            }
+            for bookmark in &mut restored.bookmarks {
+                if let Ok(new_pos) = crate::book::migrate_position_for_book(
+                    book.format,
+                    &book.path,
+                    bookmark.position,
+                ) {
+                    bookmark.position = new_pos;
+                }
+            }
+            restored.parser_version = crate::book::CURRENT_PARSER_VERSION;
+        }
         book.progress = Progress::new(book.content_metrics.clamp(restored.progress.position));
         book.bookmarks = restored
             .bookmarks
@@ -250,6 +319,7 @@ impl Store {
             })
             .collect();
         book.last_opened = restored.last_opened;
+        book.parser_version = restored.parser_version;
     }
 
     pub fn merge_legacy_record(&mut self, legacy_id: &str, current_id: &str) {
@@ -599,6 +669,25 @@ fn current_schema_version() -> u32 {
     LIBRARY_SCHEMA_VERSION
 }
 
+pub fn migrate_book_positions(book: &mut LibraryBook, _document: &BookDocument) {
+    if book.parser_version >= crate::book::CURRENT_PARSER_VERSION {
+        return;
+    }
+    if let Ok(new_pos) =
+        crate::book::migrate_position_for_book(book.format, &book.path, book.progress.position)
+    {
+        book.progress.position = new_pos;
+    }
+    for bookmark in &mut book.bookmarks {
+        if let Ok(new_pos) =
+            crate::book::migrate_position_for_book(book.format, &book.path, bookmark.position)
+        {
+            bookmark.position = new_pos;
+        }
+    }
+    book.parser_version = crate::book::CURRENT_PARSER_VERSION;
+}
+
 fn apply_metrics(book: &mut LibraryBook, metrics: ContentMetrics) {
     book.progress = Progress::new(metrics.clamp(book.progress.position));
     for bookmark in &mut book.bookmarks {
@@ -701,6 +790,7 @@ fn migrate_legacy_book(legacy: LegacyLibraryBook) -> LibraryBook {
         last_opened: legacy.last_opened,
         missing: legacy.missing,
         bookmarks,
+        parser_version: 1,
     }
 }
 

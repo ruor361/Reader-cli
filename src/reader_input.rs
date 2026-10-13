@@ -17,10 +17,16 @@ pub(crate) enum ReadingCommand {
     NextMatch,
     PreviousMatch,
     Bookmark,
+    Bookmarks,
     Metadata,
     Discreet,
     Hide,
     Progress,
+    SearchResults,
+    DecreaseWidth,
+    IncreaseWidth,
+    ResetWidth,
+    ToggleImmersive,
 }
 
 const PREVIOUS_KEYS: &[KeyChord] = &[
@@ -37,6 +43,7 @@ const NEXT_KEYS: &[KeyChord] = &[
 const GOTO_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('g'))];
 const CONTENTS_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('t'))];
 const SEARCH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('/'))];
+const SEARCH_RESULTS_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('S'))];
 const HELP_KEYS: &[KeyChord] = &[
     KeyChord::plain(KeyCode::Char('?')),
     KeyChord::plain(KeyCode::F(1)),
@@ -50,10 +57,15 @@ const END_KEYS: &[KeyChord] = &[
 const NEXT_MATCH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('n'))];
 const PREVIOUS_MATCH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('N'))];
 const BOOKMARK_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('b'))];
+const BOOKMARKS_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('B'))];
 const METADATA_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('M'))];
 const DISCREET_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('p'))];
 const HIDE_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::F(12))];
 const PROGRESS_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('s'))];
+const DECREASE_WIDTH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('['))];
+const INCREASE_WIDTH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char(']'))];
+const RESET_WIDTH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('\\'))];
+const IMMERSIVE_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('i'))];
 
 pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
     KeyBinding {
@@ -177,6 +189,16 @@ pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         hud_priority: 2,
     },
     KeyBinding {
+        command: ReadingCommand::Bookmarks,
+        chords: BOOKMARKS_KEYS,
+        keys: "B",
+        hud_keys: "B",
+        label: "Browse bookmarks",
+        short_label: "Bookmarks",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
         command: ReadingCommand::Metadata,
         chords: METADATA_KEYS,
         keys: "M",
@@ -213,6 +235,56 @@ pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         hud_keys: "s",
         label: "Show or hide progress",
         short_label: "Progress",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::SearchResults,
+        chords: SEARCH_RESULTS_KEYS,
+        keys: "S",
+        hud_keys: "S",
+        label: "Browse search results",
+        short_label: "Results",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::DecreaseWidth,
+        chords: DECREASE_WIDTH_KEYS,
+        keys: "[",
+        hud_keys: "[",
+        label: "Narrow reading width",
+        short_label: "Narrow",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::IncreaseWidth,
+        chords: INCREASE_WIDTH_KEYS,
+        keys: "]",
+        hud_keys: "]",
+        label: "Widen reading width",
+        short_label: "Widen",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::ResetWidth,
+        chords: RESET_WIDTH_KEYS,
+        keys: "\\",
+        hud_keys: "\\",
+        label: "Reset reading width to auto",
+        short_label: "Auto width",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::ToggleImmersive,
+        chords: IMMERSIVE_KEYS,
+        keys: "i",
+        hud_keys: "i",
+        label: "Toggle immersive mode",
+        short_label: "Immersive",
         show_in_hud: false,
         hud_priority: 2,
     },
@@ -325,6 +397,29 @@ pub(crate) fn action_for_key(key: KeyEvent, state: &ReaderState) -> ReaderAction
             .map(command_action)
             .unwrap_or(ReaderAction::None),
         Overlay::Percent(_) | Overlay::Search(_) => text_input_action(key),
+        Overlay::SearchResults(_) => match key.code {
+            KeyCode::Esc => ReaderAction::Cancel,
+            KeyCode::Enter => ReaderAction::Confirm,
+            KeyCode::Up | KeyCode::Char('k') => ReaderAction::Move(-1),
+            KeyCode::Down | KeyCode::Char('j') => ReaderAction::Move(1),
+            KeyCode::PageUp => ReaderAction::Move(-10),
+            KeyCode::PageDown => ReaderAction::Move(10),
+            KeyCode::Char('n') => ReaderAction::NextSearch,
+            KeyCode::Char('N') => ReaderAction::PreviousSearch,
+            _ => ReaderAction::None,
+        },
+        Overlay::Bookmarks(_) => match key.code {
+            KeyCode::Esc => ReaderAction::Cancel,
+            KeyCode::Enter => ReaderAction::Confirm,
+            KeyCode::Up | KeyCode::Char('k') => ReaderAction::Move(-1),
+            KeyCode::Down | KeyCode::Char('j') => ReaderAction::Move(1),
+            KeyCode::PageUp => ReaderAction::Move(-10),
+            KeyCode::PageDown => ReaderAction::Move(10),
+            KeyCode::Home => ReaderAction::JumpStart,
+            KeyCode::End => ReaderAction::JumpEnd,
+            KeyCode::Char('d') => ReaderAction::DeleteBookmark,
+            _ => ReaderAction::None,
+        },
         Overlay::Contents(navigator) => contents_action(key, navigator.filter_active),
         Overlay::Metadata => match key.code {
             KeyCode::Esc | KeyCode::Enter | KeyCode::Char('M') => ReaderAction::Confirm,
@@ -346,6 +441,7 @@ fn command_action(command: ReadingCommand) -> ReaderAction {
         ReadingCommand::GoToPercent => ReaderAction::OpenPercent,
         ReadingCommand::Contents => ReaderAction::OpenContents,
         ReadingCommand::Search => ReaderAction::OpenSearch,
+        ReadingCommand::SearchResults => ReaderAction::OpenSearchResults,
         ReadingCommand::Help => ReaderAction::OpenHelp,
         ReadingCommand::Quit => ReaderAction::Exit,
         ReadingCommand::Start => ReaderAction::JumpStart,
@@ -353,10 +449,15 @@ fn command_action(command: ReadingCommand) -> ReaderAction {
         ReadingCommand::NextMatch => ReaderAction::NextSearch,
         ReadingCommand::PreviousMatch => ReaderAction::PreviousSearch,
         ReadingCommand::Bookmark => ReaderAction::AddBookmark,
+        ReadingCommand::Bookmarks => ReaderAction::OpenBookmarks,
         ReadingCommand::Metadata => ReaderAction::OpenMetadata,
         ReadingCommand::Discreet => ReaderAction::ToggleDiscreet,
         ReadingCommand::Hide => ReaderAction::ToggleHidden,
         ReadingCommand::Progress => ReaderAction::ToggleProgress,
+        ReadingCommand::DecreaseWidth => ReaderAction::AdjustTextWidth(-2),
+        ReadingCommand::IncreaseWidth => ReaderAction::AdjustTextWidth(2),
+        ReadingCommand::ResetWidth => ReaderAction::ResetTextWidth,
+        ReadingCommand::ToggleImmersive => ReaderAction::ToggleImmersive,
     }
 }
 
@@ -435,6 +536,7 @@ mod tests {
             Rect::new(0, 0, 80, 24),
             ReaderConfig::default(),
             Progress::default(),
+            Vec::new(),
         )
     }
 
@@ -544,6 +646,11 @@ mod tests {
             KeyCode::Char('n'),
             KeyCode::Char('N'),
             KeyCode::Char('s'),
+            KeyCode::Char('['),
+            KeyCode::Char(']'),
+            KeyCode::Char('\\'),
+            KeyCode::Char('i'),
+            KeyCode::Char('B'),
             KeyCode::F(1),
         ] {
             assert_eq!(
@@ -552,5 +659,45 @@ mod tests {
                 "key: {code:?}"
             );
         }
+    }
+
+    #[test]
+    fn width_and_immersive_keys_map_correctly() {
+        let state = state();
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('['), KeyModifiers::NONE),
+                &state
+            ),
+            ReaderAction::AdjustTextWidth(-2)
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char(']'), KeyModifiers::NONE),
+                &state
+            ),
+            ReaderAction::AdjustTextWidth(2)
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('\\'), KeyModifiers::NONE),
+                &state
+            ),
+            ReaderAction::ResetTextWidth
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('i'), KeyModifiers::NONE),
+                &state
+            ),
+            ReaderAction::ToggleImmersive
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('B'), KeyModifiers::NONE),
+                &state
+            ),
+            ReaderAction::OpenBookmarks
+        );
     }
 }

@@ -29,6 +29,8 @@ pub struct ReadingEvent {
     pub ended_at: OffsetDateTime,
     pub start_position: TextPosition,
     pub end_position: TextPosition,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parser_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -45,6 +47,8 @@ pub struct BookmarkOperation {
     pub occurred_at: OffsetDateTime,
     #[serde(flatten)]
     pub action: BookmarkOperationAction,
+    #[serde(default, skip_serializing_if = "Option::is_none")]
+    pub parser_version: Option<u32>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
@@ -190,6 +194,7 @@ impl ReadingDataStore {
                 label: bookmark.label.clone(),
                 position: bookmark.position,
             },
+            parser_version: Some(crate::book::CURRENT_PARSER_VERSION),
         };
         self.append_bookmark_operation(&Uuid::new_v4().to_string(), &operation)
     }
@@ -200,6 +205,7 @@ impl ReadingDataStore {
             bookmark_id: bookmark_id.to_string(),
             occurred_at: OffsetDateTime::now_utc(),
             action: BookmarkOperationAction::Delete,
+            parser_version: Some(crate::book::CURRENT_PARSER_VERSION),
         };
         self.append_bookmark_operation(&Uuid::new_v4().to_string(), &operation)
     }
@@ -209,6 +215,7 @@ impl ReadingDataStore {
         book_id: &str,
         bookmark: &Bookmark,
         occurred_at: Option<SystemTime>,
+        parser_version: Option<u32>,
     ) -> Result<Vec<String>> {
         let seed = format!(
             "reader-bookmark-seed|{book_id}|{}|{}|{}|{}",
@@ -228,6 +235,7 @@ impl ReadingDataStore {
                 label: bookmark.label.clone(),
                 position: bookmark.position,
             },
+            parser_version: parser_version.or(Some(crate::book::CURRENT_PARSER_VERSION)),
         };
         self.append_bookmark_operation(&operation_id, &operation)
     }
@@ -249,6 +257,7 @@ impl ReadingDataStore {
     }
 
     pub fn synchronize_store(&self, store: &mut Store) -> Result<ReadingDataSyncReport> {
+        let migrated_legacy = store.migrate_legacy_books();
         let mut seed_warnings = Vec::new();
         for book in store.library().books() {
             for bookmark in &book.bookmarks {
@@ -256,10 +265,12 @@ impl ReadingDataStore {
                     &book.id,
                     bookmark,
                     book.last_opened,
+                    Some(book.parser_version),
                 )?);
             }
         }
         let mut report = self.reconcile()?;
+        report.state_changed |= migrated_legacy;
         report.warnings.extend(seed_warnings);
         let events = load_events(&self.local_root, false, &mut report.warnings)?;
         let operations = load_bookmark_operations(&self.local_root, false, &mut report.warnings)?;
@@ -276,13 +287,23 @@ impl ReadingDataStore {
 
         let mut latest_book: Option<StoredReadingEvent> = None;
         for stored in latest_by_book.values() {
-            if store.book_by_id(&stored.event.book_id).is_none() {
+            let Some(book) = store.book_by_id(&stored.event.book_id) else {
                 continue;
+            };
+            let mut event_pos = stored.event.end_position;
+            if stored.event.parser_version.unwrap_or(1) < crate::book::CURRENT_PARSER_VERSION
+                && book.path.exists()
+            {
+                if let Ok(new_pos) =
+                    crate::book::migrate_position_for_book(book.format, &book.path, event_pos)
+                {
+                    event_pos = new_pos;
+                }
             }
             if let Some(last_opened) = system_time_from_offset(stored.event.ended_at) {
                 report.state_changed |= store.apply_synced_progress(
                     &stored.event.book_id,
-                    Progress::new(stored.event.end_position),
+                    Progress::new(event_pos),
                     last_opened,
                 );
             }
@@ -297,22 +318,36 @@ impl ReadingDataStore {
             report.state_changed |= store.set_last_book_id(&latest.event.book_id);
         }
 
-        let mut additions: HashMap<(String, String), (String, TextPosition)> = HashMap::new();
+        let mut additions: HashMap<(String, String), (String, TextPosition, Option<u32>)> =
+            HashMap::new();
         let mut deletions: HashSet<(String, String)> = HashSet::new();
         for (_, operation) in operations {
             let key = (operation.book_id.clone(), operation.bookmark_id.clone());
             match operation.action {
                 BookmarkOperationAction::Add { label, position } => {
-                    additions.insert(key, (label, position));
+                    additions.insert(key, (label, position, operation.parser_version));
                 }
                 BookmarkOperationAction::Delete => {
                     deletions.insert(key);
                 }
             }
         }
-        for ((book_id, bookmark_id), (label, position)) in additions {
+        for ((book_id, bookmark_id), (label, mut position, op_parser_version)) in additions {
             if deletions.contains(&(book_id.clone(), bookmark_id.clone())) {
                 continue;
+            }
+            if op_parser_version.unwrap_or(1) < crate::book::CURRENT_PARSER_VERSION {
+                if let Some(book) = store.book_by_id(&book_id) {
+                    if book.path.exists() {
+                        if let Ok(new_pos) = crate::book::migrate_position_for_book(
+                            book.format,
+                            &book.path,
+                            position,
+                        ) {
+                            position = new_pos;
+                        }
+                    }
+                }
             }
             report.state_changed |= store.merge_bookmark(
                 &book_id,
@@ -475,6 +510,7 @@ fn new_active_session(
             ended_at: wall_now,
             start_position: position,
             end_position: position,
+            parser_version: Some(crate::book::CURRENT_PARSER_VERSION),
         },
         last_activity: monotonic_now,
         last_activity_wall: wall_now,
@@ -894,6 +930,7 @@ mod tests {
             ended_at: OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(1),
             start_position: TextPosition::new(0, 1),
             end_position: TextPosition::new(0, 4),
+            parser_version: None,
         };
         let value = serde_json::to_value(event).unwrap();
         assert_eq!(value.as_object().unwrap().len(), 5);
@@ -919,6 +956,7 @@ mod tests {
                     ended_at: base + time::Duration::minutes(10),
                     start_position: TextPosition::new(0, 0),
                     end_position: TextPosition::new(0, 8),
+                    parser_version: Some(crate::book::CURRENT_PARSER_VERSION),
                 },
             })
             .unwrap();
@@ -932,6 +970,7 @@ mod tests {
                     ended_at: base + time::Duration::hours(1) + time::Duration::minutes(2),
                     start_position: TextPosition::new(0, 8),
                     end_position: TextPosition::new(0, 3),
+                    parser_version: Some(crate::book::CURRENT_PARSER_VERSION),
                 },
             })
             .unwrap();

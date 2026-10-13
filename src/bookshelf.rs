@@ -346,6 +346,12 @@ struct PortableBookState {
     last_opened: Option<std::time::SystemTime>,
     #[serde(default)]
     bookmarks: Vec<Bookmark>,
+    #[serde(default = "default_parser_version")]
+    parser_version: u32,
+}
+
+fn default_parser_version() -> u32 {
+    1
 }
 
 impl From<&LibraryBook> for PortableBookState {
@@ -359,6 +365,7 @@ impl From<&LibraryBook> for PortableBookState {
             progress: book.progress,
             last_opened: book.last_opened,
             bookmarks: book.bookmarks.clone(),
+            parser_version: book.parser_version,
         }
     }
 }
@@ -378,6 +385,7 @@ impl PortableBookState {
             last_opened: self.last_opened,
             missing: false,
             bookmarks: self.bookmarks,
+            parser_version: self.parser_version,
         }
     }
 }
@@ -702,6 +710,7 @@ mod tests {
             last_opened: None,
             missing: false,
             bookmarks: Vec::new(),
+            parser_version: crate::book::CURRENT_PARSER_VERSION,
         }
     }
 

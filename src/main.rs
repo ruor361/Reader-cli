@@ -646,6 +646,7 @@ mod tests {
             last_opened: None,
             missing: false,
             bookmarks: Vec::new(),
+            parser_version: reader::book::CURRENT_PARSER_VERSION,
         };
         let row = format_library_row(&book, Some("abc"));
         assert!(row.starts_with("* "));
@@ -668,6 +669,7 @@ mod tests {
             last_opened: None,
             missing: false,
             bookmarks: Vec::new(),
+            parser_version: reader::book::CURRENT_PARSER_VERSION,
         };
         assert_eq!(progress_percent(&book), 0);
     }
@@ -687,6 +689,7 @@ mod tests {
             last_opened: None,
             missing: false,
             bookmarks: Vec::new(),
+            parser_version: reader::book::CURRENT_PARSER_VERSION,
         };
         assert_eq!(progress_percent(&book), 100);
     }
@@ -699,6 +702,7 @@ mod tests {
             ended_at: time::OffsetDateTime::UNIX_EPOCH + time::Duration::minutes(2),
             start_position: reader::book::TextPosition::new(1, 2),
             end_position: reader::book::TextPosition::new(3, 4),
+            parser_version: None,
         };
 
         let csv = render_events_csv(&[event]).unwrap();

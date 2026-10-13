@@ -38,7 +38,20 @@ pub enum ContentsSource {
     Generated,
 }
 
-#[derive(Debug, Clone, Copy, Default, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+pub const CURRENT_PARSER_VERSION: u32 = 2;
+
+#[derive(
+    Debug,
+    Clone,
+    Copy,
+    Default,
+    PartialEq,
+    Eq,
+    PartialOrd,
+    Ord,
+    serde::Serialize,
+    serde::Deserialize,
+)]
 pub struct TextPosition {
     pub section_index: usize,
     pub char_offset: usize,
@@ -163,6 +176,7 @@ pub struct BookMetadata {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct SearchResult {
     pub position: TextPosition,
+    pub end_position: TextPosition,
     pub preview: String,
 }
 
@@ -194,11 +208,18 @@ impl BookDocument {
                 let mut results = Vec::new();
                 while let Some(found) = haystack[offset..].find(&query) {
                     let byte_offset = offset + found;
+                    let match_end_byte = byte_offset + query.len();
                     let lowercase_char_offset = haystack[..byte_offset].chars().count();
+                    let lowercase_end_char_offset = haystack[..match_end_byte].chars().count();
                     let char_offset = source_chars
                         .get(lowercase_char_offset)
                         .copied()
                         .unwrap_or_else(|| section.text.chars().count());
+                    let end_char_offset = source_chars
+                        .get(lowercase_end_char_offset.saturating_sub(1))
+                        .map(|&idx| (idx + 1).min(section.text.chars().count()))
+                        .unwrap_or(char_offset + 1)
+                        .max(char_offset + 1);
                     let source_byte_offset = section
                         .text
                         .char_indices()
@@ -207,6 +228,7 @@ impl BookDocument {
                         .unwrap_or(section.text.len());
                     results.push(SearchResult {
                         position: TextPosition::new(section_index, char_offset),
+                        end_position: TextPosition::new(section_index, end_char_offset),
                         preview: preview(&section.text, source_byte_offset),
                     });
                     offset = byte_offset + query.len();
@@ -324,9 +346,10 @@ struct ManifestItem {
 }
 
 #[derive(Debug)]
-struct ExtractedXhtml {
-    text: String,
-    anchors: HashMap<String, usize>,
+pub struct ExtractedXhtml {
+    pub text: String,
+    pub source_map: Vec<Option<usize>>,
+    pub anchors: HashMap<String, usize>,
 }
 
 #[derive(Debug)]
@@ -825,7 +848,228 @@ fn decode_text(bytes: &[u8]) -> String {
     }
 }
 
-fn split_txt_sections(text: &str) -> Vec<Section> {
+pub struct TxtChapterInfo {
+    pub title: String,
+    pub text: String,
+    pub start_byte: usize,
+    pub end_byte: usize,
+    pub source_map: Vec<usize>,
+}
+
+pub fn clean_section_text_with_map(text: &str) -> (String, Vec<usize>) {
+    let mut result = String::with_capacity(text.len());
+    let mut source_map = Vec::with_capacity(text.len());
+    let mut consecutive_newlines = 0;
+
+    for (byte_offset, ch) in text.char_indices() {
+        if ch == '\n' {
+            consecutive_newlines += 1;
+            if consecutive_newlines <= 2 {
+                result.push('\n');
+                source_map.push(byte_offset);
+            }
+        } else {
+            consecutive_newlines = 0;
+            result.push(ch);
+            source_map.push(byte_offset);
+        }
+    }
+
+    let leading_newlines = result.chars().take_while(|&c| c == '\n').count();
+    let total_chars = result.chars().count();
+    if leading_newlines == total_chars {
+        return (String::new(), Vec::new());
+    }
+
+    let trailing_newlines = result.chars().rev().take_while(|&c| c == '\n').count();
+    let start_byte = leading_newlines;
+    let end_byte = result.len().saturating_sub(trailing_newlines);
+
+    let end_char = source_map.len().saturating_sub(trailing_newlines);
+    let start_char = leading_newlines.min(end_char);
+
+    let trimmed_text = result[start_byte..end_byte].to_string();
+    let trimmed_map = source_map[start_char..end_char].to_vec();
+
+    (trimmed_text, trimmed_map)
+}
+
+pub fn clean_section_text(text: &str) -> String {
+    clean_section_text_with_map(text).0
+}
+
+pub fn split_txt_sections_detailed(normalized: &str) -> Vec<TxtChapterInfo> {
+    let mut line_spans = Vec::new();
+    let mut curr = 0;
+    for line in normalized.split('\n') {
+        let start = curr;
+        let end = curr + line.len();
+        line_spans.push((start, end, line));
+        curr = end + 1;
+    }
+
+    if line_spans.is_empty() || line_spans.iter().all(|(_, _, l)| l.trim().is_empty()) {
+        let (text, source_map) = clean_section_text_with_map(normalized);
+        return vec![TxtChapterInfo {
+            title: "Text".to_string(),
+            text,
+            start_byte: 0,
+            end_byte: normalized.len(),
+            source_map,
+        }];
+    }
+
+    let mut chapter_indices = Vec::new();
+    for (idx, &(_, _, line)) in line_spans.iter().enumerate() {
+        if let Some(title) = is_txt_chapter_title(line) {
+            chapter_indices.push((idx, title));
+        }
+    }
+
+    if chapter_indices.is_empty() {
+        let (text, source_map) = clean_section_text_with_map(normalized);
+        return vec![TxtChapterInfo {
+            title: "Text".to_string(),
+            text,
+            start_byte: 0,
+            end_byte: normalized.len(),
+            source_map,
+        }];
+    }
+
+    let mut sections = Vec::new();
+    let (first_idx, _) = chapter_indices[0];
+    if first_idx > 0 {
+        let start_byte = 0;
+        let end_byte = line_spans[first_idx].0;
+        let preamble = &normalized[start_byte..end_byte];
+        let (cleaned, source_map) = clean_section_text_with_map(preamble);
+        if !cleaned.trim().is_empty() {
+            sections.push(TxtChapterInfo {
+                title: "Beginning".to_string(),
+                text: cleaned,
+                start_byte,
+                end_byte,
+                source_map,
+            });
+        }
+    }
+
+    for (i, &(start_line, ref title)) in chapter_indices.iter().enumerate() {
+        let start_byte = line_spans[start_line].0;
+        let end_byte = if i + 1 < chapter_indices.len() {
+            line_spans[chapter_indices[i + 1].0].0
+        } else {
+            normalized.len()
+        };
+        let section_content = &normalized[start_byte..end_byte];
+        let (cleaned, source_map) = clean_section_text_with_map(section_content);
+        if !cleaned.trim().is_empty() {
+            sections.push(TxtChapterInfo {
+                title: title.clone(),
+                text: cleaned,
+                start_byte,
+                end_byte,
+                source_map,
+            });
+        }
+    }
+
+    if sections.is_empty() {
+        let (text, source_map) = clean_section_text_with_map(normalized);
+        sections.push(TxtChapterInfo {
+            title: "Text".to_string(),
+            text,
+            start_byte: 0,
+            end_byte: normalized.len(),
+            source_map,
+        });
+    }
+
+    sections
+}
+
+pub fn split_txt_sections(text: &str) -> Vec<Section> {
+    let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
+    split_txt_sections_detailed(&normalized)
+        .into_iter()
+        .map(|info| Section {
+            title: info.title,
+            text: info.text,
+        })
+        .collect()
+}
+
+fn is_txt_chapter_title(line: &str) -> Option<String> {
+    let trimmed = line.trim();
+    if trimmed.is_empty() || trimmed.chars().count() > 35 {
+        return None;
+    }
+    if trimmed.contains(['。', '！', '？', '；', '…', '“', '”', '"']) {
+        return None;
+    }
+    if let Some(rest) = trimmed.strip_prefix('第') {
+        if let Some(idx) = rest.find(['章', '回', '节', '卷', '集', '部', '篇']) {
+            let num_part = &rest[..idx];
+            if !num_part.is_empty()
+                && num_part.chars().all(|c| {
+                    c.is_ascii_digit()
+                        || matches!(
+                            c,
+                            '一' | '二'
+                                | '三'
+                                | '四'
+                                | '五'
+                                | '六'
+                                | '七'
+                                | '八'
+                                | '九'
+                                | '十'
+                                | '百'
+                                | '千'
+                                | '万'
+                                | '零'
+                                | '〇'
+                                | '两'
+                        )
+                })
+            {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    const SPECIAL_HEADERS: &[&str] = &[
+        "引子", "序章", "序言", "前言", "尾声", "后记", "楔子", "番外", "附录",
+    ];
+    for header in SPECIAL_HEADERS {
+        if trimmed == *header
+            || (trimmed.starts_with(header)
+                && trimmed[header.len()..]
+                    .chars()
+                    .next()
+                    .is_some_and(|c| c.is_whitespace() || c.is_ascii_digit()))
+        {
+            return Some(trimmed.to_string());
+        }
+    }
+    let lower = trimmed.to_lowercase();
+    for prefix in &["chapter", "book", "section", "part"] {
+        if let Some(after) = lower.strip_prefix(prefix) {
+            let after = after.trim_start();
+            if after.chars().next().is_some_and(|c| c.is_ascii_digit()) {
+                return Some(trimmed.to_string());
+            }
+        }
+    }
+    for header in &["prologue", "epilogue", "preface", "introduction"] {
+        if lower == *header {
+            return Some(trimmed.to_string());
+        }
+    }
+    None
+}
+
+pub fn legacy_split_txt_sections(text: &str) -> Vec<Section> {
     let normalized = text.replace("\r\n", "\n").replace('\r', "\n");
     let chunks: Vec<String> = normalized
         .split("\n\n")
@@ -904,7 +1148,277 @@ fn chapter_title_from_html(html: &str) -> Option<String> {
         .filter(|value| !value.is_empty())
 }
 
-fn extract_xhtml(html: &str) -> ExtractedXhtml {
+#[allow(dead_code)]
+fn is_inline_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "strong"
+            | "em"
+            | "b"
+            | "i"
+            | "u"
+            | "span"
+            | "a"
+            | "code"
+            | "sub"
+            | "sup"
+            | "small"
+            | "mark"
+            | "cite"
+            | "abbr"
+            | "time"
+            | "q"
+            | "font"
+            | "dfn"
+            | "kbd"
+            | "var"
+            | "samp"
+    )
+}
+
+fn is_skip_tag(tag: &str) -> bool {
+    matches!(tag, "head" | "style" | "script" | "noscript")
+}
+
+fn is_block_tag(tag: &str) -> bool {
+    matches!(
+        tag,
+        "p" | "div"
+            | "h1"
+            | "h2"
+            | "h3"
+            | "h4"
+            | "h5"
+            | "h6"
+            | "li"
+            | "ul"
+            | "ol"
+            | "blockquote"
+            | "article"
+            | "section"
+            | "header"
+            | "footer"
+            | "pre"
+            | "table"
+            | "tr"
+            | "td"
+            | "th"
+            | "caption"
+            | "dt"
+            | "dd"
+    )
+}
+
+fn extract_xml_text_slice(slice: &str, base_offset: usize, raw: &mut Vec<(char, usize)>) {
+    if !slice.contains('&') {
+        for (byte_offset, ch) in slice.char_indices() {
+            raw.push((ch, base_offset + byte_offset));
+        }
+        return;
+    }
+
+    let mut in_entity = false;
+    let mut entity = String::new();
+    let mut entity_start_byte = 0;
+
+    for (byte_offset, ch) in slice.char_indices() {
+        if in_entity {
+            if ch == ';' {
+                in_entity = false;
+                let decoded = decode_xml_entity(&entity);
+                for decoded_ch in decoded.chars() {
+                    raw.push((decoded_ch, base_offset + entity_start_byte));
+                }
+                entity.clear();
+            } else if ch == '&' || ch.is_whitespace() || entity.len() > 10 {
+                in_entity = false;
+                raw.push(('&', base_offset + entity_start_byte));
+                for (e_byte, e_ch) in entity.char_indices() {
+                    raw.push((e_ch, base_offset + entity_start_byte + 1 + e_byte));
+                }
+                entity.clear();
+                if ch == '&' {
+                    in_entity = true;
+                    entity_start_byte = byte_offset;
+                } else {
+                    raw.push((ch, base_offset + byte_offset));
+                }
+            } else {
+                entity.push(ch);
+            }
+        } else if ch == '&' {
+            in_entity = true;
+            entity.clear();
+            entity_start_byte = byte_offset;
+        } else {
+            raw.push((ch, base_offset + byte_offset));
+        }
+    }
+
+    if in_entity {
+        raw.push(('&', base_offset + entity_start_byte));
+        for (e_byte, e_ch) in entity.char_indices() {
+            raw.push((e_ch, base_offset + entity_start_byte + 1 + e_byte));
+        }
+    }
+}
+
+fn traverse_xml_node(node: roxmltree::Node<'_, '_>, source: &str, raw: &mut Vec<(char, usize)>) {
+    if node.is_root() {
+        for child in node.children() {
+            traverse_xml_node(child, source, raw);
+        }
+    } else if node.is_element() {
+        let tag = node.tag_name().name().to_ascii_lowercase();
+        if is_skip_tag(&tag) {
+            return;
+        }
+        if tag == "br" {
+            if raw.last().is_none_or(|(c, _)| *c != '\n') {
+                raw.push(('\n', node.range().start));
+            }
+            return;
+        }
+        let is_block = is_block_tag(&tag);
+        if is_block && raw.last().is_some_and(|(c, _)| *c != '\n') {
+            raw.push(('\n', node.range().start));
+        }
+        for child in node.children() {
+            traverse_xml_node(child, source, raw);
+        }
+        if is_block && raw.last().is_some_and(|(c, _)| *c != '\n') {
+            raw.push(('\n', node.range().end));
+        }
+    } else if node.is_text() {
+        let range = node.range();
+        if let Some(text_slice) = source.get(range.start..range.end) {
+            extract_xml_text_slice(text_slice, range.start, raw);
+        }
+    }
+}
+
+pub fn extract_xhtml(html: &str) -> ExtractedXhtml {
+    let preprocessed = html.replace("&nbsp;", "&#160;");
+    if let Ok(document) = Document::parse(&preprocessed) {
+        let mut raw = Vec::with_capacity(html.len());
+        traverse_xml_node(document.root(), &preprocessed, &mut raw);
+        let (text, source_map) = normalize_raw_xhtml_text(&raw);
+        let mut anchors = HashMap::new();
+        for (id, source) in html_anchor_sources(html) {
+            let char_offset = source_map
+                .iter()
+                .position(|mapped_source| {
+                    mapped_source.is_some_and(|mapped_source| mapped_source >= source)
+                })
+                .unwrap_or(source_map.len());
+            anchors.entry(id).or_insert(char_offset);
+        }
+        return ExtractedXhtml {
+            text,
+            source_map,
+            anchors,
+        };
+    }
+
+    fallback_extract_xhtml(html)
+}
+
+fn fallback_extract_xhtml(html: &str) -> ExtractedXhtml {
+    let mut raw = Vec::with_capacity(html.chars().count());
+    let mut in_tag = false;
+    let mut current_tag = String::new();
+    let mut is_closing = false;
+    let mut entity = String::new();
+    let mut in_entity = false;
+    let mut entity_source = 0;
+    let mut in_skip = false;
+    let mut skip_tag = String::new();
+
+    for (source, ch) in html.char_indices() {
+        if in_skip {
+            if ch == '<' {
+                in_tag = true;
+                current_tag.clear();
+                is_closing = false;
+            } else if in_tag {
+                if ch == '/' && current_tag.is_empty() {
+                    is_closing = true;
+                } else if ch == '>' || ch.is_whitespace() {
+                    if is_closing && current_tag.eq_ignore_ascii_case(&skip_tag) {
+                        in_skip = false;
+                    }
+                    in_tag = false;
+                } else {
+                    current_tag.push(ch);
+                }
+            }
+            continue;
+        }
+
+        match ch {
+            '<' => {
+                in_tag = true;
+                current_tag.clear();
+                is_closing = false;
+            }
+            '>' => {
+                in_tag = false;
+                let tag_lower = current_tag.to_ascii_lowercase();
+                if !is_closing && is_skip_tag(&tag_lower) {
+                    in_skip = true;
+                    skip_tag = tag_lower;
+                } else if tag_lower == "br" {
+                    if raw.last().is_none_or(|(c, _)| *c != '\n') {
+                        raw.push(('\n', source));
+                    }
+                } else if is_block_tag(&tag_lower) && raw.last().is_none_or(|(c, _)| *c != '\n') {
+                    raw.push(('\n', source));
+                }
+            }
+            '&' if !in_tag => {
+                in_entity = true;
+                entity.clear();
+                entity_source = source;
+            }
+            ';' if in_entity => {
+                in_entity = false;
+                raw.extend(decode_entity(&entity).chars().map(|ch| (ch, entity_source)));
+            }
+            _ if in_tag => {
+                if ch == '/' && current_tag.is_empty() {
+                    is_closing = true;
+                } else if !ch.is_whitespace()
+                    && current_tag.len() < 15
+                    && !matches!(ch, '/' | '=' | '"' | '\'')
+                {
+                    current_tag.push(ch);
+                }
+            }
+            _ if in_entity => entity.push(ch),
+            _ => raw.push((ch, source)),
+        }
+    }
+
+    let (text, source_map) = normalize_raw_xhtml_text(&raw);
+    let mut anchors = HashMap::new();
+    for (id, source) in html_anchor_sources(html) {
+        let char_offset = source_map
+            .iter()
+            .position(|mapped_source| {
+                mapped_source.is_some_and(|mapped_source| mapped_source >= source)
+            })
+            .unwrap_or(source_map.len());
+        anchors.entry(id).or_insert(char_offset);
+    }
+
+    ExtractedXhtml {
+        text,
+        source_map,
+        anchors,
+    }
+}
+
+pub fn legacy_extract_xhtml(html: &str) -> (String, Vec<Option<usize>>) {
     let mut raw = Vec::with_capacity(html.chars().count());
     let mut in_tag = false;
     let mut entity = String::new();
@@ -935,19 +1449,7 @@ fn extract_xhtml(html: &str) -> ExtractedXhtml {
         }
     }
 
-    let (text, source_map) = normalize_raw_xhtml_text(&raw);
-    let mut anchors = HashMap::new();
-    for (id, source) in html_anchor_sources(html) {
-        let char_offset = source_map
-            .iter()
-            .position(|mapped_source| {
-                mapped_source.is_some_and(|mapped_source| mapped_source >= source)
-            })
-            .unwrap_or(source_map.len());
-        anchors.entry(id).or_insert(char_offset);
-    }
-
-    ExtractedXhtml { text, anchors }
+    normalize_raw_xhtml_text(&raw)
 }
 
 fn html_anchor_sources(html: &str) -> Vec<(String, usize)> {
@@ -1113,16 +1615,33 @@ fn append_clean_xhtml_line(
     }
 }
 
-fn decode_entity(entity: &str) -> &str {
+fn decode_xml_entity(entity: &str) -> std::borrow::Cow<'static, str> {
     match entity {
-        "amp" => "&",
-        "lt" => "<",
-        "gt" => ">",
-        "quot" => "\"",
-        "apos" => "'",
-        "nbsp" => " ",
-        _ => "",
+        "amp" => std::borrow::Cow::Borrowed("&"),
+        "lt" => std::borrow::Cow::Borrowed("<"),
+        "gt" => std::borrow::Cow::Borrowed(">"),
+        "quot" => std::borrow::Cow::Borrowed("\""),
+        "apos" => std::borrow::Cow::Borrowed("'"),
+        "nbsp" => std::borrow::Cow::Borrowed(" "),
+        _ => {
+            if let Some(rest) = entity.strip_prefix('#') {
+                let code_point =
+                    if let Some(hex) = rest.strip_prefix('x').or_else(|| rest.strip_prefix('X')) {
+                        u32::from_str_radix(hex, 16).ok()
+                    } else {
+                        rest.parse::<u32>().ok()
+                    };
+                if let Some(ch) = code_point.and_then(char::from_u32) {
+                    return std::borrow::Cow::Owned(ch.to_string());
+                }
+            }
+            std::borrow::Cow::Borrowed("")
+        }
     }
+}
+
+fn decode_entity(entity: &str) -> std::borrow::Cow<'static, str> {
+    decode_xml_entity(entity)
 }
 
 fn clean_inline_text(text: &str) -> String {
@@ -1165,15 +1684,257 @@ fn nearest_char_boundary(text: &str, mut offset: usize) -> usize {
     offset
 }
 
+pub fn migrate_txt_position(raw_text: &str, old_pos: TextPosition) -> TextPosition {
+    let normalized = raw_text.replace("\r\n", "\n").replace('\r', "\n");
+    let old_sections = legacy_split_txt_sections(&normalized);
+    let new_sections = split_txt_sections_detailed(&normalized);
+    if new_sections.is_empty() || old_sections.is_empty() {
+        return TextPosition::default();
+    }
+
+    let old_sec = old_pos
+        .section_index
+        .min(old_sections.len().saturating_sub(1));
+    let old_sec_text = &old_sections[old_sec].text;
+    let old_char = old_pos.char_offset.min(old_sec_text.chars().count());
+
+    let mut search_start_byte = 0;
+    let mut target_byte = 0;
+    for (i, sec) in old_sections.iter().enumerate() {
+        if let Some(pos) = normalized[search_start_byte..].find(&sec.text) {
+            let sec_start_byte = search_start_byte + pos;
+            if i == old_sec {
+                let char_byte_offset = sec
+                    .text
+                    .char_indices()
+                    .nth(old_char)
+                    .map(|(b, _)| b)
+                    .unwrap_or(sec.text.len());
+                target_byte = sec_start_byte + char_byte_offset;
+                break;
+            }
+            search_start_byte = sec_start_byte + sec.text.len();
+        }
+    }
+
+    for (new_sec_idx, info) in new_sections.iter().enumerate() {
+        if target_byte < info.end_byte || new_sec_idx == new_sections.len() - 1 {
+            let rel_byte = target_byte.saturating_sub(info.start_byte);
+            let char_offset = info
+                .source_map
+                .iter()
+                .position(|&b| b >= rel_byte)
+                .unwrap_or_else(|| info.text.chars().count());
+            return TextPosition::new(new_sec_idx, char_offset);
+        }
+    }
+
+    TextPosition::new(0, 0)
+}
+
+pub fn migrate_epub_position(html: &str, old_pos: TextPosition) -> TextPosition {
+    let (old_text, old_source_map) = legacy_extract_xhtml(html);
+    let extracted = extract_xhtml(html);
+    if extracted.text.is_empty() {
+        return TextPosition::new(old_pos.section_index, 0);
+    }
+    let old_chars_count = old_text.chars().count();
+    let old_offset = old_pos.char_offset.min(old_chars_count);
+
+    let target_source = if old_offset < old_source_map.len() {
+        old_source_map[old_offset].or_else(|| {
+            old_source_map[old_offset..]
+                .iter()
+                .copied()
+                .flatten()
+                .next()
+                .or_else(|| {
+                    old_source_map[..old_offset]
+                        .iter()
+                        .rev()
+                        .copied()
+                        .flatten()
+                        .next()
+                })
+        })
+    } else {
+        old_source_map.iter().rev().copied().flatten().next()
+    };
+
+    let new_char_offset = match target_source {
+        Some(source) => extracted
+            .source_map
+            .iter()
+            .position(|&s| s.is_some_and(|s| s >= source))
+            .unwrap_or_else(|| extracted.text.chars().count()),
+        None => {
+            if old_chars_count == 0 {
+                0
+            } else {
+                let ratio = old_offset as f64 / old_chars_count as f64;
+                (ratio * extracted.text.chars().count() as f64).round() as usize
+            }
+        }
+    };
+
+    let clamped_offset = new_char_offset.min(extracted.text.chars().count());
+    TextPosition::new(old_pos.section_index, clamped_offset)
+}
+
+pub fn migrate_position_for_book(
+    format: BookFormat,
+    book_path: &Path,
+    old_pos: TextPosition,
+) -> Result<TextPosition> {
+    match format {
+        BookFormat::Txt => {
+            let bytes = std::fs::read(book_path)
+                .with_context(|| format!("Failed to read {}", book_path.display()))?;
+            let text = decode_text(&bytes);
+            Ok(migrate_txt_position(&text, old_pos))
+        }
+        BookFormat::Epub => {
+            let file = File::open(book_path)
+                .with_context(|| format!("Failed to open {}", book_path.display()))?;
+            let mut archive = ZipArchive::new(file).context("Invalid EPUB zip container")?;
+            let rootfile = epub_rootfile(&mut archive)?;
+            let opf = read_zip_string(&mut archive, &rootfile)?;
+            let opf_doc = Document::parse(&opf).context("Invalid EPUB package document")?;
+
+            let mut manifest = HashMap::new();
+            for item in opf_doc
+                .descendants()
+                .filter(|node| node.tag_name().name() == "item")
+            {
+                if let (Some(id), Some(href)) = (item.attribute("id"), item.attribute("href")) {
+                    if let Some((item_path, _)) = resolve_archive_href(&rootfile, href) {
+                        manifest.insert(id.to_string(), item_path);
+                    }
+                }
+            }
+
+            let mut old_readable_chapters = Vec::new();
+            let mut new_readable_chapters = Vec::new();
+            for itemref in opf_doc
+                .descendants()
+                .filter(|node| node.tag_name().name() == "itemref")
+            {
+                if let Some(idref) = itemref.attribute("idref") {
+                    if let Some(path) = manifest.get(idref) {
+                        if let Ok(html) = read_zip_string(&mut archive, path) {
+                            let (old_text, _) = legacy_extract_xhtml(&html);
+                            if !old_text.trim().is_empty() {
+                                old_readable_chapters.push(path.clone());
+                            }
+                            let new_extracted = extract_xhtml(&html);
+                            if !new_extracted.text.trim().is_empty() {
+                                new_readable_chapters.push(path.clone());
+                            }
+                        }
+                    }
+                }
+            }
+
+            if let Some(chapter_path) = old_readable_chapters.get(old_pos.section_index) {
+                let new_sec_index = new_readable_chapters
+                    .iter()
+                    .position(|p| p == chapter_path)
+                    .unwrap_or(0);
+                if let Ok(html) = read_zip_string(&mut archive, chapter_path) {
+                    let migrated = migrate_epub_position(&html, old_pos);
+                    return Ok(TextPosition::new(new_sec_index, migrated.char_offset));
+                }
+            }
+            Ok(old_pos)
+        }
+        BookFormat::Pdf | BookFormat::Mobi => Ok(old_pos),
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
 
     #[test]
-    fn txt_sections_split_on_blank_lines() {
-        let sections = split_txt_sections("one\n\ntwo\n\nthree");
+    fn txt_sections_legacy_split_on_blank_lines() {
+        let sections = legacy_split_txt_sections("one\n\ntwo\n\nthree");
         assert_eq!(sections.len(), 3);
         assert_eq!(sections[1].text, "two");
+    }
+
+    #[test]
+    fn txt_sections_without_headings_merge_into_single_section() {
+        let sections = split_txt_sections("one\n\ntwo\n\nthree");
+        assert_eq!(sections.len(), 1);
+        assert_eq!(sections[0].text, "one\n\ntwo\n\nthree");
+    }
+
+    #[test]
+    fn txt_sections_detect_conservative_chapter_headings() {
+        let text = "第一章 开始\n这是第一段。\n\n这是第二段。\n\n第二章 发展\n这是第三段。";
+        let sections = split_txt_sections(text);
+        assert_eq!(sections.len(), 2);
+        assert_eq!(sections[0].title, "第一章 开始");
+        assert_eq!(
+            sections[0].text,
+            "第一章 开始\n这是第一段。\n\n这是第二段。"
+        );
+        assert_eq!(sections[1].title, "第二章 发展");
+        assert_eq!(sections[1].text, "第二章 发展\n这是第三段。");
+    }
+
+    #[test]
+    fn epub_extract_xhtml_keeps_inline_tags_in_single_line() {
+        let html = "<p>你好<strong>世界</strong>！</p>";
+        let extracted = extract_xhtml(html);
+        assert_eq!(extracted.text, "你好世界！");
+    }
+
+    #[test]
+    fn epub_extract_xhtml_nested_inline_and_entities() {
+        let html = "<p><em>Alpha <strong>&amp;</strong> Beta</em><br/>Second line</p>";
+        let extracted = extract_xhtml(html);
+        assert_eq!(extracted.text, "Alpha & Beta\nSecond line");
+    }
+
+    #[test]
+    fn txt_position_migration_maps_old_paragraphs_to_new_chapter() {
+        let text = "第一章\n第一段\n\n第二段\n\n第二章\n第三段";
+        let old_pos = TextPosition::new(1, 1);
+        let migrated = migrate_txt_position(text, old_pos);
+        assert_eq!(migrated.section_index, 0);
+        assert!(migrated.char_offset > 0);
+    }
+
+    #[test]
+    fn epub_position_migration_maps_character_offset_accurately() {
+        let html = "<p>你好<strong>世界</strong>！</p>";
+        let (old_text, _) = legacy_extract_xhtml(html);
+        let old_pos = TextPosition::new(0, old_text.chars().count().saturating_sub(1));
+        let migrated = migrate_epub_position(html, old_pos);
+        assert_eq!(migrated.section_index, 0);
+        assert_eq!(
+            migrated.char_offset,
+            "你好世界！".chars().count().saturating_sub(1)
+        );
+    }
+
+    #[test]
+    fn epub_chinese_position_migration_maps_exact_chinese_char_offset() {
+        let html = "<p>你好世界</p>";
+        let old_pos = TextPosition::new(0, 1);
+        let migrated = migrate_epub_position(html, old_pos);
+        let extracted = extract_xhtml(html);
+        assert_eq!(migrated.char_offset, 1);
+        assert_eq!(extracted.text.chars().nth(migrated.char_offset), Some('好'));
+    }
+
+    #[test]
+    fn txt_position_migration_handles_consecutive_blank_lines() {
+        let text = "alpha\n\n\nbeta";
+        let old_pos = TextPosition::new(1, 1);
+        let migrated = migrate_txt_position(text, old_pos);
+        assert_eq!(migrated, TextPosition::new(0, 8));
     }
 
     #[test]
@@ -1228,7 +1989,46 @@ mod tests {
             contents_source: ContentsSource::Generated,
         };
 
-        assert_eq!(document.search("x")[0].position, TextPosition::new(0, 1));
+        let res = document.search("x");
+        assert_eq!(res[0].position, TextPosition::new(0, 1));
+        assert_eq!(res[0].end_position, TextPosition::new(0, 2));
+
+        // 搜索扩展字符本身
+        let res_i = document.search("i");
+        assert_eq!(res_i[0].position, TextPosition::new(0, 0));
+        assert_eq!(res_i[0].end_position, TextPosition::new(0, 1));
+    }
+
+    #[test]
+    fn search_matches_cjk_characters_and_calculates_exact_range() {
+        let document = BookDocument {
+            id: "cjk".into(),
+            title: "中文书".into(),
+            path: PathBuf::new(),
+            format: BookFormat::Txt,
+            metadata: BookMetadata {
+                title: "中文书".into(),
+                author: None,
+                language: None,
+                publisher: None,
+                format: BookFormat::Txt,
+                path: PathBuf::new(),
+                section_count: 1,
+            },
+            sections: vec![Section {
+                title: "正文".into(),
+                text: "这是一个关于阅读器的测试内容，阅读器非常高效。".into(),
+            }],
+            contents: Vec::new(),
+            contents_source: ContentsSource::Generated,
+        };
+
+        let results = document.search("阅读器");
+        assert_eq!(results.len(), 2);
+        assert_eq!(results[0].position, TextPosition::new(0, 6));
+        assert_eq!(results[0].end_position, TextPosition::new(0, 9));
+        assert_eq!(results[1].position, TextPosition::new(0, 15));
+        assert_eq!(results[1].end_position, TextPosition::new(0, 18));
     }
 
     #[test]
@@ -1261,7 +2061,11 @@ mod tests {
     fn loads_txt_from_disk_with_title_and_sections() {
         let dir = tempfile::tempdir().unwrap();
         let path = dir.path().join("my-book.txt");
-        std::fs::write(&path, "First part\n\nSecond part").unwrap();
+        std::fs::write(
+            &path,
+            "Chapter 1 Start\nFirst part\n\nChapter 2 Next\nSecond part",
+        )
+        .unwrap();
 
         let document = load_txt(&path).unwrap();
 
@@ -1270,8 +2074,21 @@ mod tests {
         assert_eq!(document.metadata.title, "my-book");
         assert_eq!(document.metadata.section_count, 2);
         assert_eq!(document.sections.len(), 2);
-        assert_eq!(document.sections[0].text, "First part");
+        assert!(document.sections[0].text.contains("First part"));
         assert!(document.path.is_absolute());
+    }
+
+    #[test]
+    fn loads_txt_from_disk_without_headings_as_single_section() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("no-heading.txt");
+        std::fs::write(&path, "First part\n\nSecond part").unwrap();
+
+        let document = load_txt(&path).unwrap();
+
+        assert_eq!(document.metadata.section_count, 1);
+        assert_eq!(document.sections.len(), 1);
+        assert_eq!(document.sections[0].text, "First part\n\nSecond part");
     }
 
     #[test]

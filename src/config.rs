@@ -8,6 +8,7 @@ pub struct ReaderConfig {
     pub discreet_mode: bool,
     pub mouse_support: bool,
     pub text_width: Option<u16>,
+    pub immersive_mode: bool,
     pub library_dirs: Vec<PathBuf>,
     /// Bookshelf directory. Files added via `import` (or its `add` alias) are copied into
     /// this directory; the original is left in place. Each book gets a
@@ -27,6 +28,7 @@ impl Default for ReaderConfig {
             discreet_mode: false,
             mouse_support: false,
             text_width: None,
+            immersive_mode: false,
             library_dirs: Vec::new(),
             bookshelf_dir: None,
             network_library: NetworkLibraryConfig::default(),
@@ -99,6 +101,10 @@ impl ReaderConfig {
     pub fn toggle_discreet_mode(&mut self) {
         self.discreet_mode = !self.discreet_mode;
     }
+
+    pub fn toggle_immersive_mode(&mut self) {
+        self.immersive_mode = !self.immersive_mode;
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -109,6 +115,7 @@ struct ReaderConfigWire {
     privacy_mode: Option<bool>,
     mouse_support: bool,
     text_width: Option<u16>,
+    immersive_mode: bool,
     library_dirs: Vec<PathBuf>,
     bookshelf_dir: Option<PathBuf>,
     network_library: NetworkLibraryConfig,
@@ -123,6 +130,7 @@ impl Default for ReaderConfigWire {
             privacy_mode: None,
             mouse_support: config.mouse_support,
             text_width: config.text_width,
+            immersive_mode: config.immersive_mode,
             library_dirs: config.library_dirs,
             bookshelf_dir: config.bookshelf_dir,
             network_library: config.network_library,
@@ -141,6 +149,7 @@ impl<'de> serde::Deserialize<'de> for ReaderConfig {
             discreet_mode: wire.discreet_mode.or(wire.privacy_mode).unwrap_or(false),
             mouse_support: wire.mouse_support,
             text_width: wire.text_width,
+            immersive_mode: wire.immersive_mode,
             library_dirs: wire.library_dirs,
             bookshelf_dir: wire.bookshelf_dir,
             network_library: wire.network_library,
@@ -270,5 +279,22 @@ mod tests {
         let legacy: ReaderConfig = serde_json::from_str("{}").unwrap();
         assert!(!legacy.network_library.enabled);
         assert!(legacy.network_library.url.is_none());
+    }
+
+    #[test]
+    fn immersive_mode_defaults_to_false_and_round_trips() {
+        let legacy: ReaderConfig = serde_json::from_str("{}").unwrap();
+        assert!(!legacy.immersive_mode);
+
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("configuration.json");
+        let mut config = ReaderConfig::open(path.clone()).unwrap();
+        assert!(!config.immersive_mode);
+        config.toggle_immersive_mode();
+        assert!(config.immersive_mode);
+        config.save().unwrap();
+
+        let loaded = ReaderConfig::open(path).unwrap();
+        assert!(loaded.immersive_mode);
     }
 }

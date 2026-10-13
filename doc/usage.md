@@ -62,7 +62,12 @@ requests removal of the book file, subject to the managed-folder checks in
 | `t` | Browse the table of contents |
 | `/` | Search within the book |
 | `n` / `N` | Next / previous search result |
+| `S` | Browse search results list |
 | `b` | Add a bookmark at the current position |
+| `B` | Browse bookmarks list |
+| `[` / `]` | Narrow / widen reading text width by 2 columns |
+| `\` | Reset reading text width to auto |
+| `i` | Toggle immersive mode (hide header/footer) |
 | `M` | Show book information |
 | `s` | Show or hide reading progress |
 | `p` | Toggle Discreet Mode |
@@ -74,9 +79,41 @@ A screen is the text visible at the current terminal size. Saved progress and
 bookmarks use section-relative Unicode character positions, so resizing the
 terminal or changing the text width does not change the saved location.
 
+Searching (`/`) highlights matches in the reading view using terminal semantic
+colors, distinguishing the current active match (bold reversed style) from
+secondary matches on the same screen (accented and underlined). Full Unicode
+and CJK substrings as well as multiline matches are accurately highlighted.
+Pressing `S` opens an overlay modal listing all search matches with index,
+section title, and surrounding context preview; navigate with `j`/`k`/arrows
+and press `Enter` to jump directly to any match.
+
+Press `[` / `]` to narrow or widen the reading text width by 2 columns, or `\`
+to restore automatic terminal-width layout. Adjustments take effect immediately
+and persist to `configuration.json` while maintaining exact reading position.
+If the terminal window is narrower than configured `text_width`, content width
+is automatically constrained to the available viewport columns.
+
+Press `i` to toggle immersive mode, hiding the top status bar and bottom HUD
+so the entire screen height is dedicated to reading text. Search, table of
+contents, and help overlays remain fully accessible and pop up on demand.
+
+Press `b` to save a bookmark at the current reading position. Press `B` to open
+the bookmarks list modal, displaying all saved bookmarks with section title,
+percentage, and text snippet. Navigate with `j`/`k`/arrows, press `Enter` to jump
+to the bookmark, press `d` to delete the selected bookmark, or `Esc` to close.
+
+
 Discreet Mode displays redacted diagnostic decoration and provides a reduced
 set of controls. Hidden mode displays diagnostics; press `F12` to return. Use
 in-app help to see the controls available in the current mode.
+
+Discreet reading keeps a left-aligned text column with fixed-width log prefixes.
+Level keywords retain their terminal colors with a dim style; body text keeps
+the terminal foreground. At widths of at least 24 columns, wrapping prefers
+legal punctuation breaks within the final one-eighth of the line, keeping
+earlier pauses compact. Smaller widths use the normal Unicode wrapping rules.
+Display lines are rendered directly from pagination, preserving indentation
+and source positions without a second wrapping pass.
 
 ## Shelf controls
 
@@ -172,6 +209,17 @@ time, and materializes bookmarks into the local library. A deletion wins over an
 addition for the same bookmark ID. Mirror failures are reported as warnings;
 local saves can still succeed. Run `reader refresh` after book files have been
 added, removed, restored, or synchronized on another machine.
+
+### Multi-device sync and version upgrades
+
+Reader coordinates use versioned parsing (`v2`):
+- TXT books use conservative chapter splitting and keep continuous paragraphs.
+- EPUB books preserve inline formatting tags without breaking into extra lines.
+
+When synchronizing across multiple machines, upgrade all Reader clients to the
+latest version. If an older client writes legacy `v1` session events, newer
+clients automatically migrate incoming coordinates to `v2` before updating local
+progress, preventing legacy coordinates from corrupting reflowed book state.
 
 ## Export
 

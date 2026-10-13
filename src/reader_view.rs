@@ -25,23 +25,25 @@ pub(crate) fn draw(frame: &mut ratatui::Frame<'_>, state: &ReaderState) {
         return;
     }
 
-    let [status_area, body_area, action_area] = hud_chunks(frame.area());
-    frame.render_widget(
-        Paragraph::new(status_line(state, palette)).style(palette.base()),
-        status_area,
-    );
+    let body_area = if state.config.immersive_mode {
+        frame.area()
+    } else {
+        let [status_area, body_area, action_area] = hud_chunks(frame.area());
+        frame.render_widget(
+            Paragraph::new(status_line(state, palette)).style(palette.base()),
+            status_area,
+        );
+        frame.render_widget(
+            Paragraph::new(context_action_line(state, palette)).style(palette.base()),
+            action_area,
+        );
+        body_area
+    };
 
-    let page = &state.pages[state.current_page];
     let text_area = reading_text_area(body_area, state.config.text_width);
     frame.render_widget(
-        Paragraph::new(page.lines.join("\n"))
-            .style(palette.body())
-            .wrap(Wrap { trim: false }),
+        Paragraph::new(render_reading_lines(state, palette)).style(palette.body()),
         text_area,
-    );
-    frame.render_widget(
-        Paragraph::new(context_action_line(state, palette)).style(palette.base()),
-        action_area,
     );
 
     if let Some(notification) = state.notification.as_ref() {
@@ -59,6 +61,8 @@ pub(crate) fn draw(frame: &mut ratatui::Frame<'_>, state: &ReaderState) {
         Overlay::Percent(navigator) => draw_percent(frame, navigator, palette),
         Overlay::Contents(navigator) => draw_contents(frame, state, navigator, palette),
         Overlay::Search(input) => draw_search(frame, input, palette),
+        Overlay::SearchResults(navigator) => draw_search_results(frame, state, navigator, palette),
+        Overlay::Bookmarks(navigator) => draw_bookmarks(frame, state, navigator, palette),
         Overlay::Metadata => draw_metadata(frame, state, palette),
         Overlay::Help => draw_help(frame, palette),
     }
@@ -149,6 +153,24 @@ fn context_action_line(state: &ReaderState, palette: Palette) -> Line<'static> {
                 ("Enter", "Search"),
                 ("Backspace", "Edit"),
                 ("Esc", "Cancel"),
+            ],
+            palette,
+        ),
+        Overlay::SearchResults(_) => prompt_actions(
+            &[
+                ("j/k", "Select"),
+                ("Enter", "Jump"),
+                ("n/N", "Next/Prev"),
+                ("Esc", "Close"),
+            ],
+            palette,
+        ),
+        Overlay::Bookmarks(_) => prompt_actions(
+            &[
+                ("j/k", "Select"),
+                ("Enter", "Jump"),
+                ("d", "Delete"),
+                ("Esc", "Close"),
             ],
             palette,
         ),
@@ -380,6 +402,312 @@ fn draw_search(
     );
 }
 
+fn render_reading_lines(state: &ReaderState, palette: Palette) -> Vec<Line<'static>> {
+    let page = &state.pages[state.current_page];
+    if state.search_results.is_empty() {
+        return page
+            .lines
+            .iter()
+            .map(|line| Line::from(Span::styled(line.clone(), palette.body())))
+            .collect();
+    }
+
+    let current_section = page.section_index;
+    let relevant_matches: Vec<(usize, usize, usize)> = state
+        .search_results
+        .iter()
+        .enumerate()
+        .filter(|(_, result)| result.position.section_index == current_section)
+        .map(|(idx, result)| {
+            (
+                idx,
+                result.position.char_offset,
+                result.end_position.char_offset,
+            )
+        })
+        .collect();
+
+    if relevant_matches.is_empty() {
+        return page
+            .lines
+            .iter()
+            .map(|line| Line::from(Span::styled(line.clone(), palette.body())))
+            .collect();
+    }
+
+    let mut rendered_lines = Vec::with_capacity(page.anchored_lines.len());
+    for line in &page.anchored_lines {
+        if line.text.is_empty() {
+            rendered_lines.push(Line::from(""));
+            continue;
+        }
+
+        let has_overlap = relevant_matches
+            .iter()
+            .any(|&(_, start, end)| start < line.end_char && end > line.start_char);
+
+        if !has_overlap || line.char_offsets.is_empty() {
+            rendered_lines.push(Line::from(Span::styled(line.text.clone(), palette.body())));
+            continue;
+        }
+
+        let chars: Vec<char> = line.text.chars().collect();
+        let mut spans = Vec::new();
+        let mut span_chars = String::new();
+        let mut current_style = None;
+
+        for (i, &ch) in chars.iter().enumerate() {
+            let src_offset = line.char_offsets.get(i).copied().unwrap_or(line.start_char);
+            let mut char_style = palette.body();
+            for &(match_idx, m_start, m_end) in &relevant_matches {
+                if src_offset >= m_start && src_offset < m_end {
+                    if match_idx == state.search_index {
+                        char_style = palette.search_match_current();
+                        break;
+                    } else {
+                        char_style = palette.search_match_secondary();
+                    }
+                }
+            }
+
+            match current_style {
+                None => {
+                    current_style = Some(char_style);
+                    span_chars.push(ch);
+                }
+                Some(style) if style == char_style => {
+                    span_chars.push(ch);
+                }
+                Some(style) => {
+                    spans.push(Span::styled(std::mem::take(&mut span_chars), style));
+                    current_style = Some(char_style);
+                    span_chars.push(ch);
+                }
+            }
+        }
+
+        if !span_chars.is_empty() {
+            spans.push(Span::styled(
+                span_chars,
+                current_style.unwrap_or_else(|| palette.body()),
+            ));
+        }
+
+        rendered_lines.push(Line::from(spans));
+    }
+
+    rendered_lines
+}
+
+fn draw_search_results(
+    frame: &mut ratatui::Frame<'_>,
+    state: &ReaderState,
+    navigator: &crate::reader_state::SearchResultsNavigator,
+    palette: Palette,
+) {
+    let area = centered_rect(78, 68, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(popup_block(" Search Results ", palette), area);
+    let inner = area.inner(ratatui::layout::Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let query_label = state.search_query.as_deref().unwrap_or("");
+    let count = state.search_results.len();
+    let prompt = Line::from(vec![
+        Span::styled("Query: /", palette.body()),
+        Span::styled(query_label, palette.accent()),
+    ]);
+    frame.render_widget(
+        Paragraph::new(vec![
+            prompt,
+            Line::from(Span::styled(
+                format!(
+                    "{count} matching results (Selected {}/{count})",
+                    navigator.selection + 1
+                ),
+                palette.muted(),
+            )),
+        ])
+        .style(palette.popup()),
+        chunks[0],
+    );
+
+    let visible_items = chunks[1].height as usize;
+    let selected_row = navigator.selection.min(count.saturating_sub(1));
+    let start = selected_row.saturating_sub(visible_items.saturating_sub(1) / 2);
+    let lines = state
+        .search_results
+        .iter()
+        .enumerate()
+        .skip(start)
+        .take(visible_items)
+        .map(|(idx, result)| {
+            let section_idx = result.position.section_index;
+            let section_title = state
+                .document
+                .sections
+                .get(section_idx)
+                .map(|s| s.title.as_str())
+                .unwrap_or("Section");
+            let text = format!(
+                " {:>3}/{}  [{}]  {} ",
+                idx + 1,
+                count,
+                section_title,
+                result.preview
+            );
+            if idx == navigator.selection {
+                Line::from(Span::styled(text, palette.selected()))
+            } else {
+                Line::from(Span::styled(text, palette.body()))
+            }
+        })
+        .collect::<Vec<_>>();
+    frame.render_widget(Paragraph::new(lines).style(palette.popup()), chunks[1]);
+
+    let footer = navigator
+        .error
+        .as_deref()
+        .map(|err| Line::from(Span::styled(err.to_string(), palette.error())))
+        .unwrap_or_else(|| {
+            Line::from(Span::styled(
+                "Enter jumps · j/k moves · Esc closes · n/N moves through results",
+                palette.muted(),
+            ))
+        });
+    frame.render_widget(Paragraph::new(footer).style(palette.popup()), chunks[2]);
+}
+
+fn bookmark_preview(
+    document: &crate::book::BookDocument,
+    position: crate::book::TextPosition,
+) -> String {
+    let Some(section) = document.sections.get(position.section_index) else {
+        return String::new();
+    };
+    let chars: Vec<char> = section.text.chars().collect();
+    let start = position.char_offset;
+    let end = (start + 35).min(chars.len());
+    if start >= chars.len() {
+        return String::new();
+    }
+    let snippet: String = chars[start..end].iter().collect();
+    snippet.split_whitespace().collect::<Vec<_>>().join(" ")
+}
+
+fn draw_bookmarks(
+    frame: &mut ratatui::Frame<'_>,
+    state: &ReaderState,
+    navigator: &crate::reader_state::BookmarksNavigator,
+    palette: Palette,
+) {
+    let area = centered_rect(78, 68, frame.area());
+    frame.render_widget(Clear, area);
+    frame.render_widget(popup_block(" Bookmarks ", palette), area);
+    let inner = area.inner(ratatui::layout::Margin {
+        horizontal: 2,
+        vertical: 1,
+    });
+    let chunks = Layout::default()
+        .direction(Direction::Vertical)
+        .constraints([
+            Constraint::Length(2),
+            Constraint::Min(1),
+            Constraint::Length(1),
+        ])
+        .split(inner);
+
+    let count = state.bookmarks.len();
+    let header = if count == 0 {
+        Line::from(Span::styled("No saved bookmarks", palette.muted()))
+    } else {
+        Line::from(vec![Span::styled(
+            format!(
+                "{count} saved bookmark{} (Selected {}/{count})",
+                if count == 1 { "" } else { "s" },
+                navigator.selection + 1
+            ),
+            palette.muted(),
+        )])
+    };
+    frame.render_widget(Paragraph::new(header).style(palette.popup()), chunks[0]);
+
+    if count == 0 {
+        let empty_msg = Paragraph::new(vec![
+            Line::from(Span::styled("No bookmarks found.", palette.body())),
+            Line::from(Span::styled(
+                "Press 'b' during reading to bookmark the current position.",
+                palette.muted(),
+            )),
+        ])
+        .style(palette.popup());
+        frame.render_widget(empty_msg, chunks[1]);
+    } else {
+        let visible_items = chunks[1].height as usize;
+        let selected_row = navigator.selection.min(count.saturating_sub(1));
+        let start = selected_row.saturating_sub(visible_items.saturating_sub(1) / 2);
+        let lines = state
+            .bookmarks
+            .iter()
+            .enumerate()
+            .skip(start)
+            .take(visible_items)
+            .map(|(idx, bookmark)| {
+                let section_idx = bookmark.position.section_index;
+                let section_title = state
+                    .document
+                    .sections
+                    .get(section_idx)
+                    .map(|s| s.title.as_str())
+                    .unwrap_or("Section");
+                let pct = format_tenths(state.metrics.progress_tenths(bookmark.position));
+                let preview = bookmark_preview(&state.document, bookmark.position);
+                let preview_part = if preview.is_empty() {
+                    String::new()
+                } else {
+                    format!(" · \"{preview}\"")
+                };
+                let text = format!(
+                    " {:>2}. [{}] {} ({}){} ",
+                    idx + 1,
+                    section_title,
+                    bookmark.label,
+                    pct,
+                    preview_part,
+                );
+                if idx == navigator.selection {
+                    Line::from(Span::styled(text, palette.selected()))
+                } else {
+                    Line::from(Span::styled(text, palette.body()))
+                }
+            })
+            .collect::<Vec<_>>();
+        frame.render_widget(Paragraph::new(lines).style(palette.popup()), chunks[1]);
+    }
+
+    let footer = navigator
+        .error
+        .as_deref()
+        .map(|err| Line::from(Span::styled(err.to_string(), palette.error())))
+        .unwrap_or_else(|| {
+            Line::from(Span::styled(
+                "Enter jumps · j/k moves · d deletes · Esc closes",
+                palette.muted(),
+            ))
+        });
+    frame.render_widget(Paragraph::new(footer).style(palette.popup()), chunks[2]);
+}
+
 fn draw_metadata(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: Palette) {
     let area = centered_rect(72, 62, frame.area());
     frame.render_widget(Clear, area);
@@ -485,8 +813,7 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
     let text_area = left_aligned_reading_text_area(reading_area, Some(layout.total_width()));
     frame.render_widget(
         Paragraph::new(discreet_reading_lines(state, layout, palette, log_colors))
-            .style(palette.body())
-            .wrap(Wrap { trim: false }),
+            .style(palette.body()),
         text_area,
     );
     let (start, end, total) = state.physical_row_range();
@@ -528,7 +855,13 @@ fn discreet_reading_lines(
         .zip(prefixes)
         .map(|(body, prefix)| {
             let Some(prefix) = prefix else {
-                return Line::from(Span::styled(body.clone(), palette.body()));
+                return Line::from(vec![
+                    Span::styled(
+                        " ".repeat(usize::from(layout.prefix_mode.width())),
+                        palette.muted(),
+                    ),
+                    Span::styled(body.clone(), palette.body()),
+                ]);
             };
             let level_color = match prefix.level {
                 LogLevel::Info => log_colors.info,
@@ -537,7 +870,13 @@ fn discreet_reading_lines(
             };
             Line::from(vec![
                 Span::styled(prefix.leading, palette.muted()),
-                Span::styled(prefix.keyword, palette.base().fg(level_color)),
+                Span::styled(
+                    prefix.keyword,
+                    palette
+                        .base()
+                        .fg(level_color)
+                        .add_modifier(ratatui::style::Modifier::DIM),
+                ),
                 Span::styled(prefix.trailing, palette.muted()),
                 Span::styled(body.clone(), palette.body()),
             ])
@@ -634,6 +973,7 @@ mod tests {
     use super::*;
     use crate::book::{
         BookDocument, BookFormat, BookMetadata, ContentsEntry, ContentsSource, Section,
+        TextPosition,
     };
     use crate::config::ReaderConfig;
     use crate::storage::Progress;
@@ -673,6 +1013,7 @@ mod tests {
             Rect::new(0, 0, 80, 12),
             ReaderConfig::default(),
             Progress::default(),
+            Vec::new(),
         )
     }
 
@@ -722,6 +1063,7 @@ mod tests {
             Rect::new(0, 0, 80, 20),
             ReaderConfig::default(),
             Progress::default(),
+            Vec::new(),
         )
     }
 
@@ -907,6 +1249,20 @@ mod tests {
             palette.muted
         );
         let keyword_x = text_x + u16::try_from(prefix.leading.len()).unwrap();
+        assert!(terminal
+            .backend()
+            .buffer()
+            .cell((keyword_x, reading_y))
+            .unwrap()
+            .modifier
+            .contains(ratatui::style::Modifier::DIM));
+        assert!(!terminal
+            .backend()
+            .buffer()
+            .cell((16, reading_y))
+            .unwrap()
+            .modifier
+            .contains(ratatui::style::Modifier::DIM));
         assert_eq!(
             terminal
                 .backend()
@@ -936,6 +1292,22 @@ mod tests {
             palette.body
         );
         assert_ne!(palette.body, expected_level_color);
+    }
+
+    #[test]
+    fn discreet_render_keeps_pagination_indentation_and_blank_lines() {
+        let mut state = state();
+        state.document.sections[0].text = "  indented line\n\n  next paragraph".into();
+        state.resize(100, 24);
+        state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
+        let mut terminal = Terminal::new(TestBackend::new(100, 24)).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let y = discreet_chunks(state.viewport)[1].y;
+        let buffer = terminal.backend().buffer();
+        assert_eq!(buffer.cell((16, y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((18, y)).unwrap().symbol(), "i");
+        assert_eq!(buffer.cell((18, y + 2)).unwrap().symbol(), "n");
+        assert!((1..80).all(|x| buffer.cell((x, y + 1)).unwrap().symbol() == " "));
     }
 
     #[test]
@@ -1029,5 +1401,127 @@ mod tests {
         assert_eq!(text_area.x, 11);
         assert_eq!(text_area.width, 72);
         assert_ne!(text_area.x, area.x + (area.width - text_area.width) / 2);
+    }
+
+    #[test]
+    fn search_highlighting_distinguishes_current_and_secondary_matches_and_handles_multiline() {
+        let mut state = state();
+        state.search_query = Some("bright".into());
+        // "bright readable text" 中 "bright" 在开头 0..6
+        state.search_results = vec![
+            crate::book::SearchResult {
+                position: TextPosition::new(0, 0),
+                end_position: TextPosition::new(0, 6),
+                preview: "bright readable text".into(),
+            },
+            crate::book::SearchResult {
+                position: TextPosition::new(0, 7),
+                end_position: TextPosition::new(0, 15),
+                preview: "readable".into(),
+            },
+        ];
+        state.search_index = 0;
+
+        let palette = Palette::terminal();
+        let rendered = render_reading_lines(&state, palette);
+        let has_current = rendered.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|s| s.style == palette.search_match_current() && s.content == "bright")
+        });
+        assert!(
+            has_current,
+            "Should highlight current match with current style"
+        );
+
+        state.search_index = 1;
+        let rendered_next = render_reading_lines(&state, palette);
+        let has_current_next = rendered_next.iter().any(|line| {
+            line.spans
+                .iter()
+                .any(|s| s.style == palette.search_match_current() && s.content == "readable")
+        });
+        assert!(
+            has_current_next,
+            "Should highlight match 1 as current after switching index"
+        );
+    }
+
+    #[test]
+    fn search_results_overlay_renders_list_with_selected_row() {
+        let mut state = state();
+        state.search_query = Some("test".into());
+        state.search_results = vec![
+            crate::book::SearchResult {
+                position: TextPosition::new(0, 0),
+                end_position: TextPosition::new(0, 4),
+                preview: "test match 1".into(),
+            },
+            crate::book::SearchResult {
+                position: TextPosition::new(0, 20),
+                end_position: TextPosition::new(0, 24),
+                preview: "test match 2".into(),
+            },
+        ];
+        state.overlay = Overlay::SearchResults(crate::reader_state::SearchResultsNavigator {
+            selection: 1,
+            error: None,
+        });
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let screen = format!("{}", terminal.backend());
+        assert!(screen.contains("Search Results"));
+        assert!(screen.contains("test match 1"));
+        assert!(screen.contains("test match 2"));
+        assert!(screen.contains("2 matching results"));
+    }
+
+    #[test]
+    fn immersive_mode_hides_status_and_action_bars() {
+        let mut state = state();
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Normal mode renders title and HUD
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let normal_screen = format!("{}", terminal.backend());
+        assert!(normal_screen.contains("Book"));
+        assert!(normal_screen.contains("Next"));
+
+        // Immersive mode hides title and HUD
+        state.config.immersive_mode = true;
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let immersive_screen = format!("{}", terminal.backend());
+        assert!(!immersive_screen.contains("Book  ·"));
+        assert!(!immersive_screen.contains("[j] Next"));
+    }
+
+    #[test]
+    fn bookmarks_overlay_renders_list_and_handles_empty() {
+        let mut state = state();
+        state.overlay = Overlay::Bookmarks(crate::reader_state::BookmarksNavigator::default());
+
+        let backend = TestBackend::new(80, 24);
+        let mut terminal = Terminal::new(backend).unwrap();
+
+        // Empty state
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let empty_screen = format!("{}", terminal.backend());
+        assert!(empty_screen.contains("Bookmarks"));
+        assert!(empty_screen.contains("No bookmarks found"));
+
+        // With bookmarks
+        state.bookmarks = vec![crate::storage::Bookmark {
+            id: "bm1".into(),
+            label: "Chapter 1 Highlight".into(),
+            position: TextPosition::new(0, 0),
+        }];
+        terminal.draw(|frame| draw(frame, &state)).unwrap();
+        let populated_screen = format!("{}", terminal.backend());
+        assert!(populated_screen.contains("Chapter 1 Highlight"));
+        assert!(populated_screen.contains("1 saved bookmark"));
+        assert!(populated_screen.contains("Enter jumps · j/k moves · d deletes · Esc closes"));
     }
 }
