@@ -9,6 +9,8 @@ pub struct ReaderConfig {
     pub mouse_support: bool,
     pub text_width: Option<u16>,
     pub immersive_mode: bool,
+    pub page_overlap: bool,
+    pub natural_breaks: bool,
     pub library_dirs: Vec<PathBuf>,
     /// Bookshelf directory. Files added via `import` (or its `add` alias) are copied into
     /// this directory; the original is left in place. Each book gets a
@@ -29,6 +31,8 @@ impl Default for ReaderConfig {
             mouse_support: false,
             text_width: None,
             immersive_mode: false,
+            page_overlap: true,
+            natural_breaks: true,
             library_dirs: Vec::new(),
             bookshelf_dir: None,
             network_library: NetworkLibraryConfig::default(),
@@ -105,6 +109,14 @@ impl ReaderConfig {
     pub fn toggle_immersive_mode(&mut self) {
         self.immersive_mode = !self.immersive_mode;
     }
+
+    pub fn toggle_page_overlap(&mut self) {
+        self.page_overlap = !self.page_overlap;
+    }
+
+    pub fn toggle_natural_breaks(&mut self) {
+        self.natural_breaks = !self.natural_breaks;
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -116,6 +128,8 @@ struct ReaderConfigWire {
     mouse_support: bool,
     text_width: Option<u16>,
     immersive_mode: bool,
+    page_overlap: Option<bool>,
+    natural_breaks: Option<bool>,
     library_dirs: Vec<PathBuf>,
     bookshelf_dir: Option<PathBuf>,
     network_library: NetworkLibraryConfig,
@@ -131,6 +145,8 @@ impl Default for ReaderConfigWire {
             mouse_support: config.mouse_support,
             text_width: config.text_width,
             immersive_mode: config.immersive_mode,
+            page_overlap: Some(config.page_overlap),
+            natural_breaks: Some(config.natural_breaks),
             library_dirs: config.library_dirs,
             bookshelf_dir: config.bookshelf_dir,
             network_library: config.network_library,
@@ -150,6 +166,8 @@ impl<'de> serde::Deserialize<'de> for ReaderConfig {
             mouse_support: wire.mouse_support,
             text_width: wire.text_width,
             immersive_mode: wire.immersive_mode,
+            page_overlap: wire.page_overlap.unwrap_or(true),
+            natural_breaks: wire.natural_breaks.unwrap_or(true),
             library_dirs: wire.library_dirs,
             bookshelf_dir: wire.bookshelf_dir,
             network_library: wire.network_library,
@@ -170,6 +188,8 @@ mod tests {
         assert!(!config.discreet_mode);
         assert!(!config.mouse_support);
         assert_eq!(config.text_width, None);
+        assert!(config.page_overlap);
+        assert!(config.natural_breaks);
         assert!(config.bookshelf_dir.is_none());
     }
 
@@ -181,6 +201,8 @@ mod tests {
         assert!(!config.discreet_mode);
         assert!(!config.mouse_support);
         assert_eq!(config.text_width, None);
+        assert!(config.page_overlap);
+        assert!(config.natural_breaks);
     }
 
     #[test]

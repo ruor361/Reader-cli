@@ -24,6 +24,8 @@ pub struct Page {
     pub lines: Vec<String>,
     #[serde(default)]
     pub anchored_lines: Vec<AnchoredLine>,
+    #[serde(default)]
+    pub overlap_lines: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
@@ -99,10 +101,23 @@ pub fn paginate_with_content_height(
     content_height: u16,
     text_width: Option<u16>,
 ) -> Vec<Page> {
-    paginate_with_content_dimensions(
+    paginate_with_options(sections, width, content_height, text_width, false, false)
+}
+
+pub fn paginate_with_options(
+    sections: &[Section],
+    width: u16,
+    content_height: u16,
+    text_width: Option<u16>,
+    natural_breaks: bool,
+    page_overlap: bool,
+) -> Vec<Page> {
+    paginate_with_layout(
         sections,
         resolved_content_width(width, text_width),
         usize::from(content_height.max(1)),
+        natural_breaks,
+        page_overlap,
     )
 }
 
@@ -129,6 +144,7 @@ pub(crate) fn paginate_discreet(
         usize::from(content_width.max(1)),
         usize::from(content_height.max(1)),
         true,
+        false,
     )
 }
 
@@ -145,7 +161,7 @@ fn paginate_with_content_dimensions(
     content_width: usize,
     content_height: usize,
 ) -> Vec<Page> {
-    paginate_with_layout(sections, content_width, content_height, false)
+    paginate_with_layout(sections, content_width, content_height, false, false)
 }
 
 fn paginate_with_layout(
@@ -153,21 +169,58 @@ fn paginate_with_layout(
     content_width: usize,
     content_height: usize,
     natural_breaks: bool,
+    page_overlap: bool,
 ) -> Vec<Page> {
     let mut pages = Vec::new();
+    let effective_overlap = page_overlap && content_height >= 4;
 
     for (section_index, section) in sections.iter().enumerate() {
         let wrapped = wrap_text_with_layout(&section.text, content_width, natural_breaks);
-        for chunk in wrapped.chunks(content_height.max(1)) {
-            let start_char = chunk.first().map(|line| line.start_char).unwrap_or(0);
-            let end_char = chunk.last().map(|line| line.end_char).unwrap_or(start_char);
+        if wrapped.is_empty() {
+            continue;
+        }
+
+        let mut start_idx = 0;
+        let mut is_first_page = true;
+
+        while start_idx < wrapped.len() {
+            let (chunk, overlap_lines, new_start_char) = if is_first_page || !effective_overlap {
+                let end_idx = (start_idx + content_height).min(wrapped.len());
+                let slice = &wrapped[start_idx..end_idx];
+                let first_char = slice.first().map(|line| line.start_char).unwrap_or(0);
+                start_idx = end_idx;
+                is_first_page = false;
+                (slice.to_vec(), 0, first_char)
+            } else {
+                let prev_line = &wrapped[start_idx - 1];
+                let new_content_count = content_height.saturating_sub(1);
+                let end_idx = (start_idx + new_content_count).min(wrapped.len());
+                let new_slice = &wrapped[start_idx..end_idx];
+                let first_new_char = new_slice
+                    .first()
+                    .map(|line| line.start_char)
+                    .unwrap_or(prev_line.end_char);
+
+                let mut combined = Vec::with_capacity(1 + new_slice.len());
+                combined.push(prev_line.clone());
+                combined.extend_from_slice(new_slice);
+
+                start_idx = end_idx;
+                (combined, 1, first_new_char)
+            };
+
+            let end_char = chunk
+                .last()
+                .map(|line| line.end_char)
+                .unwrap_or(new_start_char);
             pages.push(Page {
                 index: pages.len(),
                 section_index,
-                source_start: TextPosition::new(section_index, start_char),
+                source_start: TextPosition::new(section_index, new_start_char),
                 source_end: TextPosition::new(section_index, end_char),
                 lines: chunk.iter().map(|line| line.text.clone()).collect(),
-                anchored_lines: chunk.to_vec(),
+                anchored_lines: chunk,
+                overlap_lines,
             });
         }
     }
@@ -180,6 +233,7 @@ fn paginate_with_layout(
             source_end: TextPosition::default(),
             lines: vec![String::new()],
             anchored_lines: vec![AnchoredLine::default()],
+            overlap_lines: 0,
         });
     }
 
@@ -838,6 +892,65 @@ mod tests {
         for page in &pages {
             assert_eq!(page_for_position(&pages, page.source_start), page.index);
         }
+    }
+
+    #[test]
+    fn page_overlap_keeps_last_line_as_context_and_preserves_monotonic_anchors() {
+        let sections = vec![
+            Section {
+                title: "Chapter 1".into(),
+                text: "Line 1\nLine 2\nLine 3\nLine 4\nLine 5\nLine 6\nLine 7".into(),
+            },
+            Section {
+                title: "Chapter 2".into(),
+                text: "Chap2 Line 1\nChap2 Line 2\nChap2 Line 3\nChap2 Line 4".into(),
+            },
+        ];
+
+        // 窗口高度为 4 时开启重叠：每页最多 4 行
+        // Chapter 1:
+        // Page 0: Line 1, Line 2, Line 3, Line 4 (4 行新内容, overlap=0)
+        // Page 1: Line 4 (重叠), Line 5, Line 6, Line 7 (1行重叠 + 3行新内容, overlap=1)
+        // Chapter 2:
+        // Page 2: Chap2 Line 1, Chap2 Line 2, Chap2 Line 3, Chap2 Line 4 (新章节首页, overlap=0)
+        let pages = paginate_with_options(&sections, 40, 4, None, false, true);
+        assert_eq!(pages.len(), 3);
+
+        // Page 0 检查
+        assert_eq!(pages[0].section_index, 0);
+        assert_eq!(pages[0].overlap_lines, 0);
+        assert_eq!(pages[0].lines, vec!["Line 1", "Line 2", "Line 3", "Line 4"]);
+        assert_eq!(pages[0].source_start, TextPosition::new(0, 0));
+
+        // Page 1 检查 (重叠行是 Line 4)
+        assert_eq!(pages[1].section_index, 0);
+        assert_eq!(pages[1].overlap_lines, 1);
+        assert_eq!(pages[1].lines, vec!["Line 4", "Line 5", "Line 6", "Line 7"]);
+        // source_start 必须锚定在 Line 5 的起始字符（新内容首行）
+        let line5_start = "Line 1\nLine 2\nLine 3\nLine 4\n".chars().count();
+        assert_eq!(pages[1].source_start, TextPosition::new(0, line5_start));
+        // 进度单调递增
+        assert!(pages[1].source_start.char_offset > pages[0].source_start.char_offset);
+
+        // Page 2 检查 (跨章节首页不重叠)
+        assert_eq!(pages[2].section_index, 1);
+        assert_eq!(pages[2].overlap_lines, 0);
+        assert_eq!(pages[2].lines[0], "Chap2 Line 1");
+        assert_eq!(pages[2].source_start, TextPosition::new(1, 0));
+
+        // 页面定位 page_for_position 回归验证
+        for page in &pages {
+            assert_eq!(page_for_position(&pages, page.source_start), page.index);
+        }
+
+        // 极矮窗口降级：height < 4 时自动关闭重叠
+        let dwarf_pages = paginate_with_options(&sections, 40, 3, None, false, true);
+        assert!(dwarf_pages.iter().all(|p| p.overlap_lines == 0));
+
+        // 手动关闭重叠时：所有页 overlap_lines 均为 0
+        let disabled_pages = paginate_with_options(&sections, 40, 4, None, false, false);
+        assert!(disabled_pages.iter().all(|p| p.overlap_lines == 0));
+        assert_eq!(disabled_pages[1].lines, vec!["Line 5", "Line 6", "Line 7"]);
     }
 
     #[test]

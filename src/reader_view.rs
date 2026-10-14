@@ -404,50 +404,60 @@ fn draw_search(
 
 fn render_reading_lines(state: &ReaderState, palette: Palette) -> Vec<Line<'static>> {
     let page = &state.pages[state.current_page];
-    if state.search_results.is_empty() {
-        return page
-            .lines
+    let overlap_count = page.overlap_lines;
+    let relevant_matches: Vec<(usize, usize, usize)> = if state.search_results.is_empty() {
+        Vec::new()
+    } else {
+        state
+            .search_results
             .iter()
-            .map(|line| Line::from(Span::styled(line.clone(), palette.body())))
-            .collect();
-    }
-
-    let current_section = page.section_index;
-    let relevant_matches: Vec<(usize, usize, usize)> = state
-        .search_results
-        .iter()
-        .enumerate()
-        .filter(|(_, result)| result.position.section_index == current_section)
-        .map(|(idx, result)| {
-            (
-                idx,
-                result.position.char_offset,
-                result.end_position.char_offset,
-            )
-        })
-        .collect();
+            .enumerate()
+            .filter(|(_, result)| result.position.section_index == page.section_index)
+            .map(|(idx, result)| {
+                (
+                    idx,
+                    result.position.char_offset,
+                    result.end_position.char_offset,
+                )
+            })
+            .collect()
+    };
 
     if relevant_matches.is_empty() {
         return page
             .lines
             .iter()
-            .map(|line| Line::from(Span::styled(line.clone(), palette.body())))
+            .enumerate()
+            .map(|(idx, line)| {
+                let style = if idx < overlap_count {
+                    palette.muted()
+                } else {
+                    palette.body()
+                };
+                Line::from(Span::styled(line.clone(), style))
+            })
             .collect();
     }
 
     let mut rendered_lines = Vec::with_capacity(page.anchored_lines.len());
-    for line in &page.anchored_lines {
+    for (line_idx, line) in page.anchored_lines.iter().enumerate() {
         if line.text.is_empty() {
             rendered_lines.push(Line::from(""));
             continue;
         }
+
+        let base_style = if line_idx < overlap_count {
+            palette.muted()
+        } else {
+            palette.body()
+        };
 
         let has_overlap = relevant_matches
             .iter()
             .any(|&(_, start, end)| start < line.end_char && end > line.start_char);
 
         if !has_overlap || line.char_offsets.is_empty() {
-            rendered_lines.push(Line::from(Span::styled(line.text.clone(), palette.body())));
+            rendered_lines.push(Line::from(Span::styled(line.text.clone(), base_style)));
             continue;
         }
 
@@ -458,7 +468,7 @@ fn render_reading_lines(state: &ReaderState, palette: Palette) -> Vec<Line<'stat
 
         for (i, &ch) in chars.iter().enumerate() {
             let src_offset = line.char_offsets.get(i).copied().unwrap_or(line.start_char);
-            let mut char_style = palette.body();
+            let mut char_style = base_style;
             for &(match_idx, m_start, m_end) in &relevant_matches {
                 if src_offset >= m_start && src_offset < m_end {
                     if match_idx == state.search_index {
@@ -489,7 +499,7 @@ fn render_reading_lines(state: &ReaderState, palette: Palette) -> Vec<Line<'stat
         if !span_chars.is_empty() {
             spans.push(Span::styled(
                 span_chars,
-                current_style.unwrap_or_else(|| palette.body()),
+                current_style.unwrap_or(base_style),
             ));
         }
 
@@ -1523,5 +1533,24 @@ mod tests {
         assert!(populated_screen.contains("Chapter 1 Highlight"));
         assert!(populated_screen.contains("1 saved bookmark"));
         assert!(populated_screen.contains("Enter jumps · j/k moves · d deletes · Esc closes"));
+    }
+
+    #[test]
+    fn overlap_context_line_is_rendered_with_muted_style() {
+        let mut state = state();
+        state.pages[0].overlap_lines = 1;
+        state.pages[0].lines = vec!["Context Line".into(), "New Content".into()];
+        state.pages[0].anchored_lines = vec![
+            crate::pagination::AnchoredLine::new("Context Line".into(), 0, 12, (0..12).collect()),
+            crate::pagination::AnchoredLine::new("New Content".into(), 12, 23, (12..23).collect()),
+        ];
+
+        let palette = Palette::terminal();
+        let rendered = render_reading_lines(&state, palette);
+        assert_eq!(rendered.len(), 2);
+        // 第 0 行是重叠行，样式应为 muted
+        assert_eq!(rendered[0].spans[0].style, palette.muted());
+        // 第 1 行是新内容，样式应为 body
+        assert_eq!(rendered[1].spans[0].style, palette.body());
     }
 }

@@ -68,6 +68,7 @@ requests removal of the book file, subject to the managed-folder checks in
 | `[` / `]` | Narrow / widen reading text width by 2 columns |
 | `\` | Reset reading text width to auto |
 | `i` | Toggle immersive mode (hide header/footer) |
+| `o` | Toggle page overlap context (1-line context on page turn) |
 | `M` | Show book information |
 | `s` | Show or hide reading progress |
 | `p` | Toggle Discreet Mode |
@@ -96,6 +97,14 @@ is automatically constrained to the available viewport columns.
 Press `i` to toggle immersive mode, hiding the top status bar and bottom HUD
 so the entire screen height is dedicated to reading text. Search, table of
 contents, and help overlays remain fully accessible and pop up on demand.
+
+Press `o` to toggle page overlap context. When enabled, turning to subsequent
+screens within a chapter retains the final line of the previous screen at the top
+in a dimmed/muted style, preserving reading flow without re-hunting for sentence
+starts. The saved reading position always anchors precisely to the first line of
+new content, ensuring strictly monotonic progress and stable bookmark locations.
+Cross-chapter page turns do not overlap preceding sections, and narrow viewports
+(height < 4) gracefully fall back to full-page pagination.
 
 Press `b` to save a bookmark at the current reading position. Press `B` to open
 the bookmarks list modal, displaying all saved bookmarks with section title,

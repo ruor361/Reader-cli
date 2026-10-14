@@ -27,6 +27,7 @@ pub(crate) enum ReadingCommand {
     IncreaseWidth,
     ResetWidth,
     ToggleImmersive,
+    TogglePageOverlap,
 }
 
 const PREVIOUS_KEYS: &[KeyChord] = &[
@@ -66,6 +67,7 @@ const DECREASE_WIDTH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('['))];
 const INCREASE_WIDTH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char(']'))];
 const RESET_WIDTH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('\\'))];
 const IMMERSIVE_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('i'))];
+const OVERLAP_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('o'))];
 
 pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
     KeyBinding {
@@ -288,6 +290,16 @@ pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         show_in_hud: false,
         hud_priority: 2,
     },
+    KeyBinding {
+        command: ReadingCommand::TogglePageOverlap,
+        chords: OVERLAP_KEYS,
+        keys: "o",
+        hud_keys: "o",
+        label: "Toggle page overlap context",
+        short_label: "Overlap",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
 ];
 
 pub(crate) const DISCREET_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
@@ -458,6 +470,7 @@ fn command_action(command: ReadingCommand) -> ReaderAction {
         ReadingCommand::IncreaseWidth => ReaderAction::AdjustTextWidth(2),
         ReadingCommand::ResetWidth => ReaderAction::ResetTextWidth,
         ReadingCommand::ToggleImmersive => ReaderAction::ToggleImmersive,
+        ReadingCommand::TogglePageOverlap => ReaderAction::TogglePageOverlap,
     }
 }
 
@@ -564,6 +577,13 @@ mod tests {
                 &state
             ),
             ReaderAction::OpenHelp
+        );
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('o'), KeyModifiers::NONE),
+                &state
+            ),
+            ReaderAction::TogglePageOverlap
         );
     }
 

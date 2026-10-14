@@ -5,7 +5,7 @@ use ratatui::layout::Rect;
 use crate::book::{BookDocument, ContentMetrics, SearchResult, TextPosition};
 use crate::config::ReaderConfig;
 use crate::discreet::{discreet_layout, DiscreetLogState};
-use crate::pagination::{page_for_position, paginate_discreet, paginate_with_content_height, Page};
+use crate::pagination::{page_for_position, paginate_discreet, paginate_with_options, Page};
 use crate::storage::{Bookmark, Progress};
 
 const NOTICE_DURATION: Duration = Duration::from_millis(2800);
@@ -109,6 +109,7 @@ pub(crate) enum ReaderAction {
     ToggleDiscreet,
     ToggleHidden,
     ToggleImmersive,
+    TogglePageOverlap,
     AdjustTextWidth(i16),
     ResetTextWidth,
     AddBookmark,
@@ -358,6 +359,19 @@ impl ReaderState {
                         "Immersive mode on"
                     } else {
                         "Immersive mode off"
+                    },
+                    NotificationKind::Info,
+                );
+                vec![ReaderEffect::SaveConfig]
+            }
+            ReaderAction::TogglePageOverlap => {
+                self.config.toggle_page_overlap();
+                self.repaginate();
+                self.notify(
+                    if self.config.page_overlap {
+                        "Page overlap on"
+                    } else {
+                        "Page overlap off"
                     },
                     NotificationKind::Info,
                 );
@@ -826,11 +840,13 @@ fn paginate_for_config(
     } else {
         viewport.height.saturating_sub(2).max(1)
     };
-    paginate_with_content_height(
+    paginate_with_options(
         &document.sections,
         viewport.width,
         content_height,
         config.text_width,
+        config.natural_breaks,
+        config.page_overlap,
     )
 }
 
@@ -1295,6 +1311,7 @@ mod tests {
                 source_end: TextPosition::new(0, 2),
                 lines: vec!["first".into(), String::new(), "third".into()],
                 anchored_lines: Vec::new(),
+                overlap_lines: 0,
             },
             Page {
                 index: 1,
@@ -1303,6 +1320,7 @@ mod tests {
                 source_end: TextPosition::new(0, 4),
                 lines: vec!["fourth".into(), "fifth".into()],
                 anchored_lines: Vec::new(),
+                overlap_lines: 0,
             },
         ];
 
@@ -1469,5 +1487,22 @@ mod tests {
             state.overlay,
             Overlay::Bookmarks(BookmarksNavigator { selection: 0, .. })
         ));
+    }
+
+    #[test]
+    fn page_overlap_toggle_repaginates_and_preserves_position() {
+        let mut state = state();
+        assert!(state.config.page_overlap);
+        let pos = state.position;
+
+        let effects = state.update(ReaderAction::TogglePageOverlap);
+        assert_eq!(effects, vec![ReaderEffect::SaveConfig]);
+        assert!(!state.config.page_overlap);
+        assert_eq!(state.position, pos);
+
+        let effects_back = state.update(ReaderAction::TogglePageOverlap);
+        assert_eq!(effects_back, vec![ReaderEffect::SaveConfig]);
+        assert!(state.config.page_overlap);
+        assert_eq!(state.position, pos);
     }
 }
