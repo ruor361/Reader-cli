@@ -4,7 +4,7 @@ use ratatui::layout::Rect;
 
 use crate::book::{BookDocument, ContentMetrics, SearchResult, TextPosition};
 use crate::config::ReaderConfig;
-use crate::discreet::{discreet_layout, DiscreetLogState};
+use crate::discreet::discreet_layout;
 use crate::pagination::{page_for_position, paginate_discreet, paginate_with_options, Page};
 use crate::storage::{Bookmark, Progress};
 
@@ -27,7 +27,6 @@ pub(crate) struct ReaderState {
     pub bookmarks: Vec<Bookmark>,
     pub config: ReaderConfig,
     pub hidden: bool,
-    pub discreet_log: Option<DiscreetLogState>,
 }
 
 #[derive(Debug, Default)]
@@ -163,9 +162,7 @@ impl ReaderState {
             bookmarks,
             config,
             hidden: false,
-            discreet_log: None,
         };
-        state.refresh_discreet_log();
         state
     }
 
@@ -499,42 +496,16 @@ impl ReaderState {
         if let Some(page) = self.pages.get(self.current_page) {
             self.position = page.source_start;
         }
-        self.refresh_discreet_log();
     }
 
     fn jump_to_position(&mut self, position: TextPosition) {
         self.position = self.metrics.clamp(position);
         self.current_page = page_for_position(&self.pages, self.position);
-        self.refresh_discreet_log();
     }
 
     fn repaginate(&mut self) {
         self.pages = paginate_for_config(&self.document, self.viewport, &self.config);
         self.current_page = page_for_position(&self.pages, self.position);
-        self.refresh_discreet_log();
-    }
-
-    fn refresh_discreet_log(&mut self) {
-        if !self.config.discreet_mode {
-            self.discreet_log = None;
-            return;
-        }
-        let Some(page_start) = self
-            .pages
-            .get(self.current_page)
-            .map(|page| page.source_start)
-        else {
-            self.discreet_log = None;
-            return;
-        };
-        if self
-            .discreet_log
-            .as_ref()
-            .is_some_and(|log| log.page_start() == page_start)
-        {
-            return;
-        }
-        self.discreet_log = Some(DiscreetLogState::new(&self.book_id, page_start));
     }
 
     fn move_overlay_selection(&mut self, delta: isize) {
@@ -1194,19 +1165,6 @@ mod tests {
                 .map(|notice| notice.text.as_str()),
             Some("Unavailable in discreet mode")
         );
-    }
-
-    #[test]
-    fn discreet_log_state_is_stable_until_the_visible_page_changes() {
-        let mut state = state();
-        state.update(ReaderAction::ToggleDiscreet);
-        let first = state.discreet_log.clone();
-
-        state.update(ReaderAction::AddBookmark);
-        assert_eq!(state.discreet_log, first);
-
-        state.update(ReaderAction::NextScreen);
-        assert_ne!(state.discreet_log, first);
     }
 
     #[test]
