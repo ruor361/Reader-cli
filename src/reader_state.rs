@@ -146,7 +146,7 @@ impl ReaderState {
         let position = metrics.clamp(saved.position);
         let pages = paginate_for_config(&document, viewport, &config);
         let current_page = page_for_position(&pages, position);
-        let mut state = Self {
+        let state = Self {
             document,
             book_id,
             metrics,
@@ -333,9 +333,9 @@ impl ReaderState {
                 self.repaginate();
                 self.notify(
                     if self.config.discreet_mode {
-                        "Discreet mode on"
+                        "Agent terminal on"
                     } else {
-                        "Discreet mode off"
+                        "Agent terminal off"
                     },
                     NotificationKind::Info,
                 );
