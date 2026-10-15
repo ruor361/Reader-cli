@@ -4,13 +4,13 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::book::ContentsSource;
-use crate::discreet::{discreet_layout, discreet_stack, LogLevel, DISCREET_ERROR_LINE};
+use crate::discreet::discreet_layout;
 use crate::reader_input::READING_BINDINGS;
 use crate::reader_state::{
     discreet_chunks, format_tenths, ContentsNavigator, NotificationKind, Overlay, ReaderState,
 };
 use crate::ui::{
-    action_line, centered_rect, fill_background, help_lines, hud_chunks, DiscreetLogColors, Palette,
+    action_line, centered_rect, fill_background, help_lines, hud_chunks, Palette,
 };
 
 pub(crate) fn draw(frame: &mut ratatui::Frame<'_>, state: &ReaderState) {
@@ -201,12 +201,6 @@ fn reading_text_area(area: Rect, text_width: Option<u16>) -> Rect {
         width,
         area.height,
     )
-}
-
-fn left_aligned_reading_text_area(area: Rect, text_width: Option<u16>) -> Rect {
-    let mut text_area = reading_text_area(area, text_width);
-    text_area.x = area.x.saturating_add(u16::from(area.width > 1));
-    text_area
 }
 
 fn draw_notification(
@@ -806,157 +800,87 @@ fn draw_help(frame: &mut ratatui::Frame<'_>, palette: Palette) {
     frame.render_widget(Paragraph::new(right).style(palette.popup()), columns[1]);
 }
 
+// The agent transcript is deliberately a local display, not an actual AI invocation.
 fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: Palette) {
-    let log_colors = DiscreetLogColors::terminal();
     let palette = palette.discreet_mode();
-    let [stack_area, reading_area, action_area] = discreet_chunks(frame.area());
+    let [header_area, output_area, footer_area] = discreet_chunks(frame.area());
     frame.render_widget(
-        Paragraph::new(discreet_diagnostic_lines(
-            palette,
-            stack_area.height,
-            reading_area.height,
-        ))
-        .style(palette.base()),
-        stack_area,
+        Paragraph::new(agent_header_lines(palette)).style(palette.base()),
+        header_area,
     );
+
     let layout = discreet_layout(frame.area(), state.config.text_width);
-    let text_area = left_aligned_reading_text_area(reading_area, Some(layout.total_width()));
+    let indent = if output_area.width >= 8 { 3 } else { 0 };
+    let text_area = Rect::new(
+        output_area.x.saturating_add(indent),
+        output_area.y,
+        layout.body_width.min(output_area.width.saturating_sub(indent)),
+        output_area.height,
+    );
+    let lines: Vec<Line<'static>> = state
+        .pages
+        .get(state.current_page)
+        .map(|page| {
+            page.lines
+                .iter()
+                .map(|body| Line::from(Span::styled(body.clone(), palette.body())))
+                .collect()
+        })
+        .unwrap_or_default();
+    frame.render_widget(Paragraph::new(lines).style(palette.body()), text_area);
+
     frame.render_widget(
-        Paragraph::new(discreet_reading_lines(state, layout, palette, log_colors))
-            .style(palette.body()),
-        text_area,
+        Paragraph::new(agent_footer_lines(state, palette)).style(palette.base()),
+        footer_area,
     );
-    let (start, end, total) = state.physical_row_range();
-    let status_area = Rect::new(
-        action_area.x.saturating_add(1),
-        action_area.y,
-        action_area.width.saturating_sub(1),
-        action_area.height,
-    );
-    frame.render_widget(
-        Paragraph::new(format!("rows {start}-{end}/{total}")).style(palette.muted()),
-        status_area,
-    );
-    if let Some(notification) = state.notification.as_ref() {
-        draw_notification(
-            frame,
-            reading_area,
-            notification.text.as_str(),
-            notification.kind,
-            palette,
-        );
-    }
+    // Do not display reader notifications here: they can contain book metadata.
 }
 
-fn discreet_reading_lines(
-    state: &ReaderState,
-    layout: crate::discreet::DiscreetLayout,
-    palette: Palette,
-    log_colors: DiscreetLogColors,
-) -> Vec<Line<'static>> {
-    let page = &state.pages[state.current_page];
-    let prefixes = state
-        .discreet_log
-        .as_ref()
-        .map(|log| log.prefixes(&page.lines, layout.prefix_mode))
-        .unwrap_or_else(|| vec![None; page.lines.len()]);
-    page.lines
-        .iter()
-        .zip(prefixes)
-        .map(|(body, prefix)| {
-            let Some(prefix) = prefix else {
-                return Line::from(vec![
-                    Span::styled(
-                        " ".repeat(usize::from(layout.prefix_mode.width())),
-                        palette.muted(),
-                    ),
-                    Span::styled(body.clone(), palette.body()),
-                ]);
-            };
-            let level_color = match prefix.level {
-                LogLevel::Info => log_colors.info,
-                LogLevel::Warn => log_colors.warning,
-                LogLevel::Error => log_colors.error,
-            };
-            Line::from(vec![
-                Span::styled(prefix.leading, palette.muted()),
-                Span::styled(
-                    prefix.keyword,
-                    palette
-                        .base()
-                        .fg(level_color)
-                        .add_modifier(ratatui::style::Modifier::DIM),
-                ),
-                Span::styled(prefix.trailing, palette.muted()),
-                Span::styled(body.clone(), palette.body()),
-            ])
-        })
-        .collect()
+fn agent_header_lines(palette: Palette) -> Vec<Line<'static>> {
+    vec![
+        Line::from(vec![
+            Span::styled("╭─ ", palette.muted()),
+            Span::styled("Agent session", palette.body()),
+            Span::styled("  •  workspace", palette.muted()),
+        ]),
+        Line::from(vec![
+            Span::styled("│  > ", palette.muted()),
+            Span::styled("Inspect local context", palette.body()),
+        ]),
+        Line::from(vec![
+            Span::styled("│  ● ", palette.muted()),
+            Span::styled("Read", palette.body()),
+            Span::styled("  workspace/context.txt", palette.muted()),
+        ]),
+        Line::from(Span::styled("│    ⎿  Tool output", palette.muted())),
+    ]
+}
+
+fn agent_footer_lines(state: &ReaderState, palette: Palette) -> Vec<Line<'static>> {
+    let (start, end, total) = state.physical_row_range();
+    vec![
+        Line::from(Span::styled(
+            format!("   ⎿  lines {start}-{end}/{total}"),
+            palette.muted(),
+        )),
+        Line::from(vec![
+            Span::styled("❯ ", palette.body()),
+            Span::styled("_", palette.muted()),
+        ]),
+    ]
 }
 
 fn draw_hidden(frame: &mut ratatui::Frame<'_>, palette: Palette) {
-    frame.render_widget(
-        Paragraph::new(diagnostic_lines(palette))
-            .style(palette.base())
-            .wrap(Wrap { trim: false }),
-        frame.area(),
-    );
-}
-
-fn diagnostic_lines(palette: Palette) -> Vec<Line<'static>> {
-    discreet_stack()
-        .lines()
-        .map(|line| {
-            if line == DISCREET_ERROR_LINE || line.trim() == "^" {
-                Line::from(Span::styled(line.to_string(), palette.error()))
-            } else if let Some(frame) = stack_frame_line(line, palette) {
-                frame
-            } else if line.trim().is_empty() {
-                Line::from(" ")
-            } else if line.contains("dist") && line.ends_with(":184") {
-                Line::from(Span::styled(line.to_string(), palette.muted()))
-            } else {
-                Line::from(Span::styled(line.to_string(), palette.body()))
-            }
-        })
-        .collect()
-}
-
-fn discreet_diagnostic_lines(
-    palette: Palette,
-    stack_height: u16,
-    reading_height: u16,
-) -> Vec<Line<'static>> {
-    let lines = diagnostic_lines(palette);
-    let error_index = discreet_stack()
-        .lines()
-        .position(|line| line == DISCREET_ERROR_LINE)
-        .unwrap_or(0);
-    let available_call_frame_rows =
-        usize::from(stack_height).saturating_sub(error_index.saturating_add(1));
-
-    if available_call_frame_rows < usize::from(reading_height) {
-        lines.into_iter().skip(error_index).collect()
-    } else {
-        lines
-    }
-}
-
-fn stack_frame_line(line: &str, palette: Palette) -> Option<Line<'static>> {
-    let trimmed = line.trim_start();
-    let frame = trimmed.strip_prefix("at ")?;
-    let indent = " ".repeat(line.len().saturating_sub(trimmed.len()));
-    if let Some((function, location)) = frame.rsplit_once(" (") {
-        return Some(Line::from(vec![
-            Span::styled(format!("{indent}at "), palette.muted()),
-            Span::styled(function.to_string(), palette.body()),
-            Span::styled(format!(" ({location}"), palette.muted()),
-        ]));
-    }
-    Some(Line::from(vec![
-        Span::styled(format!("{indent}at "), palette.muted()),
-        Span::styled(frame.to_string(), palette.body()),
-    ]))
+    let lines = vec![
+        Line::from(Span::styled("╭─ Agent session  •  workspace", palette.muted())),
+        Line::from(Span::styled("│  > Inspect local context", palette.body())),
+        Line::from(Span::styled("│  ● Read  workspace/context.txt", palette.muted())),
+        Line::from(Span::styled("│    ⎿  Output folded", palette.muted())),
+        Line::from(Span::styled("╰─", palette.muted())),
+        Line::from(""),
+        Line::from(Span::styled("❯ _", palette.body())),
+    ];
+    frame.render_widget(Paragraph::new(lines).style(palette.base()), frame.area());
 }
 
 fn truncate_width(text: &str, width: usize) -> String {
@@ -1164,148 +1088,41 @@ mod tests {
     }
 
     #[test]
-    fn discreet_render_hides_hud_and_metadata() {
+    fn agent_terminal_renders_a_read_tool_not_error_logs() {
         let mut state = state();
         state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
         state.overlay = Overlay::Metadata;
-        let backend = TestBackend::new(80, 12);
-        let mut terminal = Terminal::new(backend).unwrap();
-        terminal.draw(|frame| draw(frame, &state)).unwrap();
-        let screen = format!("{}", terminal.backend());
-        assert!(screen.contains("TypeError"));
-        assert!(screen.contains("bright readable text"));
-        assert!(screen.contains("rows 1-1/1"));
-        assert!(!screen.contains("Book information"));
-        assert!(!screen.contains("[g]"));
-        assert!(!screen.contains("F12"));
-        assert_eq!(screen.matches("TypeError").count(), 1);
-    }
-
-    #[test]
-    fn discreet_render_compacts_the_preamble_to_show_more_stack_frames() {
-        let mut state = state();
-        state.resize(80, 14);
-        state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
-        let backend = TestBackend::new(80, 14);
-        let mut terminal = Terminal::new(backend).unwrap();
-
+        let mut terminal = Terminal::new(TestBackend::new(80, 12)).unwrap();
         terminal.draw(|frame| draw(frame, &state)).unwrap();
 
         let screen = format!("{}", terminal.backend());
-        assert_eq!(discreet_chunks(Rect::new(0, 0, 80, 14))[1].height, 4);
-        for frame in [
-            "resolveActiveSession",
-            "renderWorkspace",
-            "commitHookEffectListMount",
-            "commitPassiveMountOnFiber",
-        ] {
-            assert!(screen.contains(frame), "missing stack frame: {frame}");
+        for expected in ["Agent session", "Inspect local context", "Read", "bright readable text", "lines 1-1/1"] {
+            assert!(screen.contains(expected), "missing {expected}");
         }
-        assert!(!screen.contains("node .\\dist\\server.js"));
-        assert!(!screen.contains("session.js:184\n  const profile"));
+        for forbidden in ["TypeError", "INFO", "WARN", "Book information", "F12", "bright readable text bright readable text"] {
+            assert!(!screen.contains(forbidden), "found obsolete UI: {forbidden}");
+        }
     }
 
     #[test]
-    fn discreet_log_decoration_is_stable_between_redraws() {
-        let mut state = state();
-        state.resize(100, 18);
-        state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
-        let backend = TestBackend::new(100, 18);
-        let mut terminal = Terminal::new(backend).unwrap();
+    fn agent_terminal_devotes_most_of_the_height_to_reading() {
+        let [header, reading, footer] = discreet_chunks(Rect::new(0, 0, 80, 24));
+        assert_eq!((header.height, reading.height, footer.height), (4, 18, 2));
+    }
 
+    #[test]
+    fn agent_terminal_redraw_is_stable() {
+        let mut state = state();
+        state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
+        let mut terminal = Terminal::new(TestBackend::new(100, 18)).unwrap();
         terminal.draw(|frame| draw(frame, &state)).unwrap();
         let first = format!("{}", terminal.backend());
         terminal.draw(|frame| draw(frame, &state)).unwrap();
-        let second = format!("{}", terminal.backend());
-
-        assert_eq!(first, second);
-        assert!(
-            first.contains(" INFO  ") || first.contains(" WARN  ") || first.contains(" ERROR ")
-        );
+        assert_eq!(first, format!("{}", terminal.backend()));
     }
 
     #[test]
-    fn discreet_prefix_colors_only_the_level_keyword() {
-        let mut state = state();
-        state.resize(100, 18);
-        state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
-        let backend = TestBackend::new(100, 18);
-        let mut terminal = Terminal::new(backend).unwrap();
-
-        terminal.draw(|frame| draw(frame, &state)).unwrap();
-
-        let palette = Palette::terminal().discreet_mode();
-        let colors = DiscreetLogColors::terminal();
-        let prefix = state.discreet_log.as_ref().unwrap().prefixes(
-            &state.pages[state.current_page].lines,
-            crate::discreet::DiscreetPrefixMode::Full,
-        )[0]
-        .clone()
-        .unwrap();
-        let expected_level_color = match prefix.level {
-            LogLevel::Info => colors.info,
-            LogLevel::Warn => colors.warning,
-            LogLevel::Error => colors.error,
-        };
-        let reading_y = discreet_chunks(Rect::new(0, 0, 100, 18))[1].y;
-        let text_x = 1;
-        assert_eq!(
-            terminal
-                .backend()
-                .buffer()
-                .cell((text_x, reading_y))
-                .unwrap()
-                .fg,
-            palette.muted
-        );
-        let keyword_x = text_x + u16::try_from(prefix.leading.len()).unwrap();
-        assert!(terminal
-            .backend()
-            .buffer()
-            .cell((keyword_x, reading_y))
-            .unwrap()
-            .modifier
-            .contains(ratatui::style::Modifier::DIM));
-        assert!(!terminal
-            .backend()
-            .buffer()
-            .cell((16, reading_y))
-            .unwrap()
-            .modifier
-            .contains(ratatui::style::Modifier::DIM));
-        assert_eq!(
-            terminal
-                .backend()
-                .buffer()
-                .cell((keyword_x, reading_y))
-                .unwrap()
-                .fg,
-            expected_level_color
-        );
-        let trailing_x = keyword_x + u16::try_from(prefix.keyword.len()).unwrap();
-        assert_eq!(
-            terminal
-                .backend()
-                .buffer()
-                .cell((trailing_x, reading_y))
-                .unwrap()
-                .fg,
-            palette.muted
-        );
-        assert_eq!(
-            terminal
-                .backend()
-                .buffer()
-                .cell((16, reading_y))
-                .unwrap()
-                .fg,
-            palette.body
-        );
-        assert_ne!(palette.body, expected_level_color);
-    }
-
-    #[test]
-    fn discreet_render_keeps_pagination_indentation_and_blank_lines() {
+    fn agent_tool_output_preserves_indentation_and_blank_lines() {
         let mut state = state();
         state.document.sections[0].text = "  indented line\n\n  next paragraph".into();
         state.resize(100, 24);
@@ -1314,37 +1131,28 @@ mod tests {
         terminal.draw(|frame| draw(frame, &state)).unwrap();
         let y = discreet_chunks(state.viewport)[1].y;
         let buffer = terminal.backend().buffer();
-        assert_eq!(buffer.cell((16, y)).unwrap().symbol(), " ");
-        assert_eq!(buffer.cell((18, y)).unwrap().symbol(), "i");
-        assert_eq!(buffer.cell((18, y + 2)).unwrap().symbol(), "n");
-        assert!((1..80).all(|x| buffer.cell((x, y + 1)).unwrap().symbol() == " "));
+        assert_eq!(buffer.cell((3, y)).unwrap().symbol(), " ");
+        assert_eq!(buffer.cell((5, y)).unwrap().symbol(), "i");
+        assert_eq!(buffer.cell((5, y + 2)).unwrap().symbol(), "n");
+        assert!((3..70).all(|x| buffer.cell((x, y + 1)).unwrap().symbol() == " "));
     }
 
     #[test]
-    fn discreet_status_bar_only_shows_muted_physical_row_range() {
+    fn agent_footer_shows_only_neutral_tool_output_range() {
         let mut state = state();
-        state.resize(100, 18);
         state.update(crate::reader_state::ReaderAction::ToggleDiscreet);
-        let backend = TestBackend::new(100, 18);
-        let mut terminal = Terminal::new(backend).unwrap();
-
+        let mut terminal = Terminal::new(TestBackend::new(100, 18)).unwrap();
         terminal.draw(|frame| draw(frame, &state)).unwrap();
-
-        let discreet = Palette::terminal().discreet_mode();
-        let action_y = discreet_chunks(Rect::new(0, 0, 100, 18))[2].y;
-        let first_status_cell = terminal.backend().buffer().cell((1, action_y)).unwrap();
-        assert_eq!(first_status_cell.fg, discreet.muted);
-
-        let (start, end, total) = state.physical_row_range();
         let screen = format!("{}", terminal.backend());
-        assert!(screen.contains(&format!("rows {start}-{end}/{total}")));
-        for hidden_hint in ["[k]", "[j]", "Bookmark", "Normal", "F12"] {
-            assert!(!screen.contains(hidden_hint));
+        let (start, end, total) = state.physical_row_range();
+        assert!(screen.contains(&format!("lines {start}-{end}/{total}")));
+        for forbidden in ["[k]", "Bookmark", "Normal", "F12", "TypeError"] {
+            assert!(!screen.contains(forbidden));
         }
     }
 
     #[test]
-    fn hidden_render_contains_only_neutral_diagnostics() {
+    fn hidden_agent_terminal_contains_no_private_reader_state() {
         let mut state = state();
         state.overlay = Overlay::Search(crate::reader_state::SearchInput {
             query: "secret query".into(),
@@ -1352,65 +1160,14 @@ mod tests {
         });
         state.notify("secret notification", NotificationKind::Info);
         state.hidden = true;
-        let backend = TestBackend::new(80, 24);
-        let mut terminal = Terminal::new(backend).unwrap();
-
+        let mut terminal = Terminal::new(TestBackend::new(80, 24)).unwrap();
         terminal.draw(|frame| draw(frame, &state)).unwrap();
-
         let screen = format!("{}", terminal.backend());
-        assert!(screen.contains("resolveActiveSession"));
-        for secret in [
-            "bright readable text",
-            "secret query",
-            "secret notification",
-            "Book information",
-            "DiscreetOverlay",
-            "PrivacyOverlay",
-        ] {
+        assert!(screen.contains("Agent session"));
+        assert!(screen.contains("Output folded"));
+        for secret in ["bright readable text", "secret query", "secret notification", "Book information", "TypeError"] {
             assert!(!screen.contains(secret), "leaked: {secret}");
         }
-    }
-
-    #[test]
-    fn diagnostics_only_color_the_error_and_caret_red() {
-        let palette = Palette::terminal();
-        let lines = diagnostic_lines(palette);
-        let error = lines
-            .iter()
-            .find(|line| {
-                line.spans
-                    .iter()
-                    .any(|span| span.content == DISCREET_ERROR_LINE)
-            })
-            .unwrap();
-        assert_eq!(error.spans[0].style.fg, Some(palette.error));
-        let caret = lines
-            .iter()
-            .find(|line| line.spans.iter().any(|span| span.content.trim() == "^"))
-            .unwrap();
-        assert_eq!(caret.spans[0].style.fg, Some(palette.error));
-        let stack = lines
-            .iter()
-            .find(|line| {
-                line.spans
-                    .iter()
-                    .any(|span| span.content.contains("resolveActiveSession"))
-            })
-            .unwrap();
-        assert!(stack
-            .spans
-            .iter()
-            .all(|span| span.style.fg != Some(palette.error)));
-    }
-
-    #[test]
-    fn discreet_reading_area_is_left_aligned() {
-        let area = Rect::new(10, 5, 120, 8);
-        let text_area = left_aligned_reading_text_area(area, Some(72));
-
-        assert_eq!(text_area.x, 11);
-        assert_eq!(text_area.width, 72);
-        assert_ne!(text_area.x, area.x + (area.width - text_area.width) / 2);
     }
 
     #[test]

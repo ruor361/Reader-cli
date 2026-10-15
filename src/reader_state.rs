@@ -4,7 +4,7 @@ use ratatui::layout::Rect;
 
 use crate::book::{BookDocument, ContentMetrics, SearchResult, TextPosition};
 use crate::config::ReaderConfig;
-use crate::discreet::{discreet_layout, DiscreetLogState};
+use crate::discreet::discreet_layout;
 use crate::pagination::{page_for_position, paginate_discreet, paginate_with_options, Page};
 use crate::storage::{Bookmark, Progress};
 
@@ -27,7 +27,6 @@ pub(crate) struct ReaderState {
     pub bookmarks: Vec<Bookmark>,
     pub config: ReaderConfig,
     pub hidden: bool,
-    pub discreet_log: Option<DiscreetLogState>,
 }
 
 #[derive(Debug, Default)]
@@ -147,7 +146,7 @@ impl ReaderState {
         let position = metrics.clamp(saved.position);
         let pages = paginate_for_config(&document, viewport, &config);
         let current_page = page_for_position(&pages, position);
-        let mut state = Self {
+        Self {
             document,
             book_id,
             metrics,
@@ -163,10 +162,7 @@ impl ReaderState {
             bookmarks,
             config,
             hidden: false,
-            discreet_log: None,
-        };
-        state.refresh_discreet_log();
-        state
+        }
     }
 
     pub fn current_progress(&self) -> Progress {
@@ -336,9 +332,9 @@ impl ReaderState {
                 self.repaginate();
                 self.notify(
                     if self.config.discreet_mode {
-                        "Discreet mode on"
+                        "Agent terminal on"
                     } else {
-                        "Discreet mode off"
+                        "Agent terminal off"
                     },
                     NotificationKind::Info,
                 );
@@ -499,42 +495,16 @@ impl ReaderState {
         if let Some(page) = self.pages.get(self.current_page) {
             self.position = page.source_start;
         }
-        self.refresh_discreet_log();
     }
 
     fn jump_to_position(&mut self, position: TextPosition) {
         self.position = self.metrics.clamp(position);
         self.current_page = page_for_position(&self.pages, self.position);
-        self.refresh_discreet_log();
     }
 
     fn repaginate(&mut self) {
         self.pages = paginate_for_config(&self.document, self.viewport, &self.config);
         self.current_page = page_for_position(&self.pages, self.position);
-        self.refresh_discreet_log();
-    }
-
-    fn refresh_discreet_log(&mut self) {
-        if !self.config.discreet_mode {
-            self.discreet_log = None;
-            return;
-        }
-        let Some(page_start) = self
-            .pages
-            .get(self.current_page)
-            .map(|page| page.source_start)
-        else {
-            self.discreet_log = None;
-            return;
-        };
-        if self
-            .discreet_log
-            .as_ref()
-            .is_some_and(|log| log.page_start() == page_start)
-        {
-            return;
-        }
-        self.discreet_log = Some(DiscreetLogState::new(&self.book_id, page_start));
     }
 
     fn move_overlay_selection(&mut self, delta: isize) {
@@ -851,22 +821,29 @@ fn paginate_for_config(
 }
 
 pub(crate) fn discreet_chunks(area: Rect) -> [Rect; 3] {
-    let action_height = u16::from(area.height >= 5);
-    let desired_reading_height = (area.height / 3).clamp(1, 8);
-    let reading_height = desired_reading_height.min(area.height.saturating_sub(action_height));
-    let stack_height = area
-        .height
-        .saturating_sub(reading_height)
-        .saturating_sub(action_height);
-    let stack = Rect::new(area.x, area.y, area.width, stack_height);
+    let header_height = if area.height >= 10 {
+        4
+    } else if area.height >= 5 {
+        2
+    } else {
+        u16::from(area.height >= 2)
+    };
+    let footer_height = if area.height >= 10 {
+        2
+    } else {
+        u16::from(area.height >= 4)
+    };
+    let reading_height = area.height.saturating_sub(header_height + footer_height);
+
+    let header = Rect::new(area.x, area.y, area.width, header_height);
     let reading = Rect::new(
         area.x,
-        area.y.saturating_add(stack_height),
+        area.y.saturating_add(header_height),
         area.width,
         reading_height,
     );
-    let action = Rect::new(area.x, reading.bottom(), area.width, action_height);
-    [stack, reading, action]
+    let footer = Rect::new(area.x, reading.bottom(), area.width, footer_height);
+    [header, reading, footer]
 }
 
 fn discreet_content_height(viewport: Rect) -> u16 {
@@ -1190,56 +1167,30 @@ mod tests {
     }
 
     #[test]
-    fn discreet_log_state_is_stable_until_the_visible_page_changes() {
-        let mut state = state();
-        state.update(ReaderAction::ToggleDiscreet);
-        let first = state.discreet_log.clone();
-
-        state.update(ReaderAction::AddBookmark);
-        assert_eq!(state.discreet_log, first);
-
-        state.update(ReaderAction::NextScreen);
-        assert_ne!(state.discreet_log, first);
+    fn agent_layout_reserves_a_small_transcript_header_and_footer() {
+        for (height, expected) in [
+            (24, (4, 18, 2)),
+            (8, (2, 5, 1)),
+            (4, (1, 2, 1)),
+            (1, (0, 1, 0)),
+            (0, (0, 0, 0)),
+        ] {
+            let [header, output, footer] = discreet_chunks(Rect::new(0, 0, 80, height));
+            assert_eq!((header.height, output.height, footer.height), expected);
+            assert_eq!(header.height + output.height + footer.height, height);
+        }
     }
 
     #[test]
-    fn discreet_layout_adapts_the_body_from_one_to_eight_rows() {
-        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 80, 24));
-        assert_eq!(stack.height + reading.height + action.height, 24);
-        assert_eq!(reading.height, 8);
-        assert_eq!(action.height, 1);
-
-        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 8));
-        assert_eq!(stack.height + reading.height + action.height, 8);
-        assert_eq!(reading.height, 2);
-        assert_eq!(action.height, 1);
-
-        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 4));
-        assert_eq!(stack.height, 3);
-        assert_eq!(reading.height, 1);
-        assert_eq!(action.height, 0);
-
-        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 1));
-        assert_eq!(stack.height, 0);
-        assert_eq!(reading.height, 1);
-        assert_eq!(action.height, 0);
-
-        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 0));
-        assert_eq!(stack.height, 0);
-        assert_eq!(reading.height, 0);
-        assert_eq!(action.height, 0);
-    }
-
-    #[test]
-    fn discreet_text_width_stays_between_twenty_four_and_thirty_two_chinese_characters() {
+    fn agent_tool_output_width_preserves_cjk_readability() {
         let wide = Rect::new(0, 0, 120, 24);
         assert_eq!(discreet_layout(wide, None).body_width, 64);
         assert_eq!(discreet_layout(wide, Some(20)).body_width, 48);
         assert_eq!(discreet_layout(wide, Some(64)).body_width, 64);
-        assert_eq!(discreet_layout(wide, Some(100)).body_width, 64);
+        assert_eq!(discreet_layout(wide, Some(100)).body_width, 72);
         assert_eq!(
             discreet_layout(Rect::new(0, 0, 42, 24), None).body_width,
-            38
+            36
         );
     }
 
@@ -1297,7 +1248,7 @@ mod tests {
         assert!(state.pages[0]
             .lines
             .iter()
-            .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 48));
+            .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 46));
     }
 
     #[test]
