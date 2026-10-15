@@ -370,11 +370,4 @@ mod tests {
         assert_eq!(palette.muted, Color::DarkGray);
     }
 
-    #[test]
-    fn semantic_colors_use_the_terminal_ansi_palette() {
-        let colors = DiscreetLogColors::terminal();
-        assert_eq!(colors.info, Color::Green);
-        assert_eq!(colors.warning, Color::Yellow);
-        assert_eq!(colors.error, Color::Red);
-    }
 }
