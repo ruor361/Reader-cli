@@ -8,9 +8,6 @@ use crate::book::TextPosition;
 pub const DISCREET_ERROR_LINE: &str =
     "TypeError: Cannot read properties of undefined (reading 'profile')";
 
-const DISCREET_TEXT_MIN_WIDTH: u16 = 48;
-const DISCREET_TEXT_PREFERRED_WIDTH: u16 = 64;
-const DISCREET_TEXT_MAX_WIDTH: u16 = 64;
 const FULL_PREFIX_WIDTH: u16 = 15;
 const COMPACT_PREFIX_WIDTH: u16 = 8;
 const MINIMAL_PREFIX_WIDTH: u16 = 2;
