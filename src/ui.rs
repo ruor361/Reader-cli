@@ -5,23 +5,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 use unicode_width::UnicodeWidthStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DiscreetLogColors {
-    pub info: Color,
-    pub warning: Color,
-    pub error: Color,
-}
-
-impl DiscreetLogColors {
-    pub(crate) const fn terminal() -> Self {
-        Self {
-            info: Color::Green,
-            warning: Color::Yellow,
-            error: Color::Red,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
     pub background: Color,
