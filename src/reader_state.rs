@@ -146,7 +146,7 @@ impl ReaderState {
         let position = metrics.clamp(saved.position);
         let pages = paginate_for_config(&document, viewport, &config);
         let current_page = page_for_position(&pages, position);
-        let state = Self {
+        Self {
             document,
             book_id,
             metrics,
@@ -162,8 +162,7 @@ impl ReaderState {
             bookmarks,
             config,
             hidden: false,
-        };
-        state
+        }
     }
 
     pub fn current_progress(&self) -> Progress {
