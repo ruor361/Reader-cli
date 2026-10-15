@@ -94,39 +94,17 @@ impl DiscreetLayout {
     }
 }
 
+// Legacy log-prefix types are retained for compatibility with older data/tests.
+// Agent Terminal renders the source as a single Read tool result, without per-line prefixes.
 pub(crate) fn discreet_layout(viewport: Rect, configured_width: Option<u16>) -> DiscreetLayout {
-    let available = viewport.width.saturating_sub(2).max(1);
-    let target = configured_width
-        .unwrap_or(DISCREET_TEXT_PREFERRED_WIDTH)
-        .clamp(DISCREET_TEXT_MIN_WIDTH, DISCREET_TEXT_MAX_WIDTH);
-
-    if available >= target.saturating_add(FULL_PREFIX_WIDTH) {
-        return DiscreetLayout {
-            body_width: target,
-            prefix_mode: DiscreetPrefixMode::Full,
-        };
-    }
-    if available >= target.saturating_add(COMPACT_PREFIX_WIDTH) {
-        return DiscreetLayout {
-            body_width: target,
-            prefix_mode: DiscreetPrefixMode::Compact,
-        };
-    }
-    if available >= target.saturating_add(MINIMAL_PREFIX_WIDTH) {
-        return DiscreetLayout {
-            body_width: target,
-            prefix_mode: DiscreetPrefixMode::Minimal,
-        };
-    }
-    if available > MINIMAL_PREFIX_WIDTH {
-        return DiscreetLayout {
-            body_width: available.saturating_sub(MINIMAL_PREFIX_WIDTH).max(1),
-            prefix_mode: DiscreetPrefixMode::Minimal,
-        };
-    }
-
+    // Reserve a three-column transcript indent and a right margin.
+    let available = viewport.width.saturating_sub(6).max(1);
+    let body_width = configured_width
+        .unwrap_or(64)
+        .clamp(48, 72)
+        .min(available);
     DiscreetLayout {
-        body_width: target.min(available),
+        body_width,
         prefix_mode: DiscreetPrefixMode::None,
     }
 }
@@ -289,35 +267,16 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_adapts_without_sacrificing_reading_floor() {
-        let full = discreet_layout(Rect::new(0, 0, 81, 24), None);
-        assert_eq!(full.prefix_mode, DiscreetPrefixMode::Full);
-        assert_eq!(full.body_width, 64);
-
-        let compact = discreet_layout(Rect::new(0, 0, 74, 24), None);
-        assert_eq!(compact.prefix_mode, DiscreetPrefixMode::Compact);
-        assert_eq!(compact.body_width, 64);
-
-        let minimal = discreet_layout(Rect::new(0, 0, 73, 24), None);
-        assert_eq!(minimal.prefix_mode, DiscreetPrefixMode::Minimal);
-        assert_eq!(minimal.body_width, 64);
-
-        let floor = discreet_layout(Rect::new(0, 0, 52, 24), None);
-        assert_eq!(floor.prefix_mode, DiscreetPrefixMode::Minimal);
-        assert_eq!(floor.body_width, 48);
-
-        let narrow = discreet_layout(Rect::new(0, 0, 51, 24), None);
-        assert_eq!(narrow.prefix_mode, DiscreetPrefixMode::Minimal);
-        assert_eq!(narrow.body_width, 47);
-
-        let extreme = discreet_layout(Rect::new(0, 0, 4, 24), None);
-        assert_eq!(extreme.prefix_mode, DiscreetPrefixMode::None);
-        assert_eq!(extreme.body_width, 2);
-
-        for width in 1..=160 {
-            let layout = discreet_layout(Rect::new(0, 0, width, 24), None);
-            assert!(layout.total_width() <= width.saturating_sub(2).max(1));
+    fn agent_layout_uses_tool_output_width_without_log_prefixes() {
+        for (columns, expected) in [
+            (120, 64), (81, 64), (74, 64), (52, 46), (51, 45), (4, 1),
+        ] {
+            let layout = discreet_layout(Rect::new(0, 0, columns, 24), None);
+            assert_eq!(layout.prefix_mode, DiscreetPrefixMode::None);
+            assert_eq!(layout.body_width, expected);
+            assert!(layout.total_width() <= columns.saturating_sub(6).max(1));
         }
+        assert_eq!(discreet_layout(Rect::new(0, 0, 120, 24), Some(100)).body_width, 72);
     }
 
     #[test]
