@@ -112,17 +112,26 @@ percentage, and text snippet. Navigate with `j`/`k`/arrows, press `Enter` to jum
 to the bookmark, press `d` to delete the selected bookmark, or `Esc` to close.
 
 
-Discreet Mode displays redacted diagnostic decoration and provides a reduced
-set of controls. Hidden mode displays diagnostics; press `F12` to return. Use
-in-app help to see the controls available in the current mode.
+Agent Terminal Mode (the existing `discreet_mode` configuration) renders a **simulated**
+coding-agent transcript instead of error logs. The screen has a fixed session header,
+a `Read workspace/context.txt` tool call, a large plain-text tool-output region,
+a neutral output line range, and a prompt. The labels and path are placeholders:
+**no AI model is invoked and no files are actually read by an agent**.
 
-Discreet reading keeps a left-aligned text column with fixed-width log prefixes.
-Level keywords retain their terminal colors with a dim style; body text keeps
-the terminal foreground. At widths of at least 24 columns, wrapping prefers
-legal punctuation breaks within the final one-eighth of the line, keeping
-earlier pauses compact. Smaller widths use the normal Unicode wrapping rules.
-Display lines are rendered directly from pagination, preserving indentation
-and source positions without a second wrapping pass.
+The reading text is still the current book. It is left-aligned, keeps natural
+punctuation breaks, preserves blank lines/indentation, and is not prefixed with
+timestamp/severity markers. A header of up to four rows and a footer of up to
+two rows leave the rest of the terminal height to the text. The text is normally
+64 terminal columns wide, adjustable through the existing `text_width` setting;
+narrow terminals automatically reduce it. The mode uses the existing
+screen-by-screen navigation keys, character-anchored progress, and bookmarks.
+It does not yet implement smooth or line-by-line scrolling.
+
+Press `p` to enter or leave Agent Terminal Mode. Press `F12` to immediately
+fold all reading output into an idle Agent transcript; press it again to return.
+The mode suppresses reader notifications, metadata, search queries, and UI
+shortcuts that would expose the book. A nearby viewer can still read visible
+text; this is a cosmetic low-exposure layout, not a privacy or security boundary.
 
 ## Shelf controls
 
