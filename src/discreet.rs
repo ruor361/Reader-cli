@@ -111,19 +111,23 @@ impl AgentLayout {
             AgentViewMode::Compact
         };
 
-        let (banner_h, head_h, foot_h) = if is_full {
-            let head = if area.height >= 28 { 6 } else { 4 };
-            (3, head, 3)
-        } else {
-            let head = if area.height >= 14 { 2 } else { 1 };
-            let foot = if area.height >= 14 { 2 } else { 1 };
-            (0, head, foot)
+        // 60:40 Rule: Visible prose is capped at <= 40% of viewport height.
+        let max_text = match area.height {
+            0..=12 => 3,
+            13..=19 => 5,
+            20..=25 => 7,
+            26..=32 => 9,
+            _ => 12,
         };
-
-        let avail_mid = area.height.saturating_sub(banner_h + head_h + foot_h);
-        let max_text = if area.height >= 26 { 16 } else { 12 };
-        let text_rows = avail_mid.saturating_sub(2).min(max_text).max(1);
-        let body_height = (text_rows + 2).min(avail_mid);
+        let body_height = (max_text + 2).min(area.height.saturating_sub(4));
+        let foot_h = if is_full {
+            3
+        } else {
+            2.min(area.height.saturating_sub(body_height))
+        };
+        let remaining = area.height.saturating_sub(body_height + foot_h);
+        let banner_h = if is_full { 3.min(remaining) } else { 0 };
+        let head_h = remaining.saturating_sub(banner_h);
 
         let indent = if area.width < 50 { 2 } else { 4 };
         let available = area.width.saturating_sub(indent + 2);
@@ -259,9 +263,9 @@ mod tests {
     #[test]
     fn layout_matches_approved_grid_and_never_escapes_viewport() {
         for (w, h, mode, banner, head, body, foot, cols, net_text) in [
-            (80, 24, AgentViewMode::Full, 3, 4, 14, 3, 72, 12),
-            (120, 30, AgentViewMode::Full, 3, 6, 18, 3, 72, 16),
-            (60, 18, AgentViewMode::Compact, 0, 2, 14, 2, 54, 12),
+            (80, 24, AgentViewMode::Full, 3, 9, 9, 3, 72, 7),
+            (120, 30, AgentViewMode::Full, 3, 13, 11, 3, 72, 9),
+            (60, 18, AgentViewMode::Compact, 0, 9, 7, 2, 54, 5),
         ] {
             let l = AgentLayout::new(Rect::new(0, 0, w, h), None);
             assert_eq!(
@@ -276,7 +280,12 @@ mod tests {
                 ),
                 (mode, banner, head, body, foot, cols, net_text)
             );
-            assert!(l.net_text_height() >= 10 && l.net_text_height() <= 16);
+            // 60:40 verification: prose <= 40% of height, Agent >= 50%
+            assert!(f64::from(l.net_text_height()) / f64::from(h) <= 0.40);
+            assert!(
+                f64::from(l.banner.height + l.header.height + l.footer.height) / f64::from(h)
+                    >= 0.50
+            );
         }
         for w in 0..=140 {
             for h in 0..=40 {

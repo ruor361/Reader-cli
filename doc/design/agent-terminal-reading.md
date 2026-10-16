@@ -56,13 +56,26 @@ Illustrative bracketed placeholders must never be rendered literally.
 
 ## Layout and reading comfort
 
+- **Core Area Ratio Constraint (Agent 60% : Reading 40%)**:
+  The simulated Agent session area must be greater than or equal to the prose reading
+  area. Default target is **60:40**, with a strict minimum requirement of **50:50**.
+  Never maximize reading prose to fill the terminal; first look authentic as a
+  Coding Agent, and secondly read comfortably within it.
+- **Five Code Requirements**:
+  1. *Ratio constraint*: Visible Agent chrome, tool hierarchy and controls occupy >= 50%–60%
+     of terminal lines; prose reading occupies <= 40%–50%.
+  2. *Responsive adaptation*: Calculate distinct proportional layouts for compact and full terminals.
+     No fixed 4-row header plus all-remaining-body prose.
+  3. *Prose height cap*: Determined strictly by terminal dimensions and the 60:40 rule (e.g. 6–8 lines
+     at 24 rows, 9–11 lines at 30 rows, 5–6 lines at 18 rows).
+  4. *Agent authenticity from real state*: Every tool event and state detail (encoding, format,
+     sections, range, density) must be driven by actual local reader state without synthetic logs.
+  5. *Reading continuity*: Maintain intact paragraphs, indentation, mono-anchored paging, and
+     accurate Unicode `TextPosition` recovery across chunks and resize.
 - Primary visual acceptance viewport: a **~500px right-side terminal** in
   a 1400×900 split desktop. Also test various font sizes and terminal
   sizes (about 40, 60, and 80 columns). Layout engine uses **terminal
   cell columns**, not hard-coded pixel width.
-- Experiment with **10–16 useful body rows per response** based on
-  paragraph boundaries and viewport height; tune by actual reading,
-  not by max-fill rules. It is a starting hypothesis, not a fixed cap.
 - Preserve legible foreground contrast, CJK punctuation line-breaking,
   natural indentation and blank lines. Preserve exact original text.
 - Keep muted chrome and visible text distinct; avoid book-style cards,

@@ -1405,14 +1405,20 @@ mod tests {
     #[test]
     fn agent_terminal_four_semantic_regions_and_comfortable_rows() {
         for (w, h, expected_net_rows, is_full) in
-            [(80, 24, 12, true), (60, 18, 12, false), (120, 30, 16, true)]
+            [(80, 24, 7, true), (60, 18, 5, false), (120, 30, 9, true)]
         {
             let mut s = state();
             s.resize(w, h);
             s.update(crate::reader_state::ReaderAction::ToggleDiscreet);
             let layout = AgentLayout::new(s.viewport, s.config.text_width);
             assert_eq!(layout.net_text_height(), expected_net_rows);
-            assert!(layout.net_text_height() >= 10 && layout.net_text_height() <= 16);
+            // 60:40 verification: prose <= 40% of height, Agent >= 50%
+            assert!(f64::from(layout.net_text_height()) / f64::from(h) <= 0.40);
+            assert!(
+                f64::from(layout.banner.height + layout.header.height + layout.footer.height)
+                    / f64::from(h)
+                    >= 0.50
+            );
 
             let mut terminal = Terminal::new(TestBackend::new(w, h)).unwrap();
             terminal.draw(|f| draw(f, &s)).unwrap();

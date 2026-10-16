@@ -15,7 +15,7 @@ const ATOM: &str = "http://www.w3.org/2005/Atom";
 const MAX_FEED_BYTES: u64 = 8 * 1024 * 1024;
 const MAX_BOOK_BYTES: u64 = 256 * 1024 * 1024;
 
-#[derive(Debug, Clone)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub struct RemoteBook {
     pub id: String,
     pub title: String,

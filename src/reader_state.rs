@@ -1382,14 +1382,15 @@ mod tests {
     #[test]
     fn agent_scroll_and_screen_overlap_use_source_rows() {
         let mut s = agent_state(80, 24);
-        assert_eq!(s.physical_row_range(), (1, 12, 101));
+        assert_eq!(s.physical_row_range(), (1, 7, 101));
         s.update(ReaderAction::ScrollLines(2));
         assert_eq!(s.agent.view.top, 2);
         assert_eq!(s.position, s.agent.view.lines[2].position());
         s.update(ReaderAction::NextScreen);
-        assert_eq!(s.agent.view.top, 13);
+        // top 2 + (7 - 1) = 8
+        assert_eq!(s.agent.view.top, 8);
         assert_eq!(s.agent.view.context_rows, 1);
-        assert_eq!(s.position, s.agent.view.lines[14].position());
+        assert_eq!(s.position, s.agent.view.lines[9].position());
         s.update(ReaderAction::PreviousScreen);
         assert_eq!(s.agent.view.top, 2);
         assert_eq!(s.agent.view.context_rows, 0);
@@ -1492,13 +1493,20 @@ mod tests {
         s.resize(80, 24);
         s.update(ReaderAction::ToggleDiscreet);
         s.update(ReaderAction::NextScreen);
-        assert_eq!(s.position, TextPosition::new(1, 0));
-        assert_eq!(s.agent.view.context_rows, 0);
+        // In 80x24 net text height is 7. Section 0 has 12 lines.
+        // First NextScreen moves by 6 lines (to line 6 of section 0).
+        assert_eq!(s.agent.view.top, 6);
+        assert_eq!(s.position, TextPosition::new(0, 14));
+        assert_eq!(s.agent.view.context_rows, 1);
+        // Second NextScreen: moves from 6 by 6 -> top is 12 (which is section 1 line 0: "next")
+        s.update(ReaderAction::NextScreen);
+        assert_eq!(s.agent.view.top, 12);
+        assert_eq!(s.position, TextPosition::new(1, 5));
+        assert_eq!(s.agent.view.context_rows, 1);
+        // Third NextScreen: top 12 + height 7 = 19 >= view.lines.len() (14). At end, does not repeat.
         let reads = s.agent.reads;
         s.update(ReaderAction::NextScreen);
         assert_eq!(s.agent.reads, reads);
-        s.update(ReaderAction::ScrollLines(-2));
-        assert_eq!(s.agent.view.top, 10);
     }
 
     #[test]
