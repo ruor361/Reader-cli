@@ -1,0 +1,122 @@
+[
+  {
+    "file": "80x24-reading",
+    "cols": 80,
+    "rows": 24,
+    "header_rows": 4,
+    "body_rows": 16,
+    "body_cols": 72,
+    "state": "reading",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "80x24-scrolled",
+    "cols": 80,
+    "rows": 24,
+    "header_rows": 4,
+    "body_rows": 16,
+    "body_cols": 72,
+    "state": "scrolled",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "80x24-checkpoint",
+    "cols": 80,
+    "rows": 24,
+    "header_rows": 4,
+    "body_rows": 16,
+    "body_cols": 72,
+    "state": "checkpoint",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "80x24-folded",
+    "cols": 80,
+    "rows": 24,
+    "header_rows": 4,
+    "body_rows": 16,
+    "body_cols": 72,
+    "state": "folded",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "120x30-reading",
+    "cols": 120,
+    "rows": 30,
+    "header_rows": 4,
+    "body_rows": 22,
+    "body_cols": 72,
+    "state": "reading",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "120x30-scrolled",
+    "cols": 120,
+    "rows": 30,
+    "header_rows": 4,
+    "body_rows": 22,
+    "body_cols": 72,
+    "state": "scrolled",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "120x30-checkpoint",
+    "cols": 120,
+    "rows": 30,
+    "header_rows": 4,
+    "body_rows": 22,
+    "body_cols": 72,
+    "state": "checkpoint",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "120x30-folded",
+    "cols": 120,
+    "rows": 30,
+    "header_rows": 4,
+    "body_rows": 22,
+    "body_cols": 72,
+    "state": "folded",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "60x18-reading",
+    "cols": 60,
+    "rows": 18,
+    "header_rows": 3,
+    "body_rows": 11,
+    "body_cols": 54,
+    "state": "reading",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "60x18-scrolled",
+    "cols": 60,
+    "rows": 18,
+    "header_rows": 3,
+    "body_rows": 11,
+    "body_cols": 54,
+    "state": "scrolled",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "60x18-checkpoint",
+    "cols": 60,
+    "rows": 18,
+    "header_rows": 3,
+    "body_rows": 11,
+    "body_cols": 54,
+    "state": "checkpoint",
+    "kind": "design mockup, not runtime capture"
+  },
+  {
+    "file": "60x18-folded",
+    "cols": 60,
+    "rows": 18,
+    "header_rows": 3,
+    "body_rows": 11,
+    "body_cols": 54,
+    "state": "folded",
+    "kind": "design mockup, not runtime capture"
+  }
+]

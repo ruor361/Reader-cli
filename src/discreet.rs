@@ -1,19 +1,10 @@
-use std::time::{SystemTime, UNIX_EPOCH};
-
+//! Agent-style presentation for local reading. Legacy diagnostic exports remain compatible.
+use crate::book::{Section, TextPosition};
+use crate::pagination::{wrap_text_with_layout, AnchoredLine};
 use ratatui::layout::Rect;
-use time::OffsetDateTime;
-
-use crate::book::TextPosition;
 
 pub const DISCREET_ERROR_LINE: &str =
     "TypeError: Cannot read properties of undefined (reading 'profile')";
-
-const DISCREET_TEXT_MIN_WIDTH: u16 = 48;
-const DISCREET_TEXT_PREFERRED_WIDTH: u16 = 64;
-const DISCREET_TEXT_MAX_WIDTH: u16 = 64;
-const FULL_PREFIX_WIDTH: u16 = 15;
-const COMPACT_PREFIX_WIDTH: u16 = 8;
-const MINIMAL_PREFIX_WIDTH: u16 = 2;
 
 #[cfg(windows)]
 const CAMOUFLAGE_STACK: &str = r#"PS C:\workspace\dashboard-client> node .\dist\server.js
@@ -63,225 +54,175 @@ pub fn discreet_stack() -> &'static str {
     CAMOUFLAGE_STACK
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum DiscreetPrefixMode {
-    Full,
-    Compact,
-    Minimal,
-    None,
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub(crate) enum AgentDensity {
+    #[default]
+    Comfortable,
+    Inspect,
 }
 
-impl DiscreetPrefixMode {
-    pub(crate) const fn width(self) -> u16 {
+impl AgentDensity {
+    pub fn toggle(self) -> Self {
         match self {
-            Self::Full => FULL_PREFIX_WIDTH,
-            Self::Compact => COMPACT_PREFIX_WIDTH,
-            Self::Minimal => MINIMAL_PREFIX_WIDTH,
-            Self::None => 0,
+            Self::Comfortable => Self::Inspect,
+            Self::Inspect => Self::Comfortable,
+        }
+    }
+
+    #[allow(dead_code)]
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Comfortable => "comfortable",
+            Self::Inspect => "inspect",
         }
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DiscreetLayout {
-    pub body_width: u16,
-    pub prefix_mode: DiscreetPrefixMode,
+#[derive(Debug, Clone, Copy)]
+pub(crate) struct AgentLayout {
+    pub header: Rect,
+    pub body: Rect,
+    pub footer: Rect,
 }
 
-impl DiscreetLayout {
-    pub(crate) const fn total_width(self) -> u16 {
-        self.body_width.saturating_add(self.prefix_mode.width())
-    }
-}
-
-pub(crate) fn discreet_layout(viewport: Rect, configured_width: Option<u16>) -> DiscreetLayout {
-    let available = viewport.width.saturating_sub(2).max(1);
-    let target = configured_width
-        .unwrap_or(DISCREET_TEXT_PREFERRED_WIDTH)
-        .clamp(DISCREET_TEXT_MIN_WIDTH, DISCREET_TEXT_MAX_WIDTH);
-
-    if available >= target.saturating_add(FULL_PREFIX_WIDTH) {
-        return DiscreetLayout {
-            body_width: target,
-            prefix_mode: DiscreetPrefixMode::Full,
+impl AgentLayout {
+    pub fn new(area: Rect, configured_width: Option<u16>) -> Self {
+        if area.height < 6 {
+            return Self {
+                header: Rect::new(area.x, area.y, area.width, area.height.min(1)),
+                body: Rect::default(),
+                footer: Rect::default(),
+            };
+        }
+        let (head, foot) = match area.height {
+            0..=5 => (area.height.min(1), 0),
+            6..=13 => (1, 1),
+            14..=21 => (2, 2),
+            _ => (4, 3),
         };
-    }
-    if available >= target.saturating_add(COMPACT_PREFIX_WIDTH) {
-        return DiscreetLayout {
-            body_width: target,
-            prefix_mode: DiscreetPrefixMode::Compact,
-        };
-    }
-    if available >= target.saturating_add(MINIMAL_PREFIX_WIDTH) {
-        return DiscreetLayout {
-            body_width: target,
-            prefix_mode: DiscreetPrefixMode::Minimal,
-        };
-    }
-    if available > MINIMAL_PREFIX_WIDTH {
-        return DiscreetLayout {
-            body_width: available.saturating_sub(MINIMAL_PREFIX_WIDTH).max(1),
-            prefix_mode: DiscreetPrefixMode::Minimal,
-        };
-    }
+        let avail_mid = area.height.saturating_sub(head + foot);
+        let max_text = if area.height >= 20 { 16 } else { 12 };
+        let text_rows = avail_mid.saturating_sub(2).min(max_text).max(1);
+        let body_height = (text_rows + 2).min(avail_mid);
 
-    DiscreetLayout {
-        body_width: target.min(available),
-        prefix_mode: DiscreetPrefixMode::None,
-    }
-}
+        let indent = if area.width < 50 { 2 } else { 4 };
+        let available = area.width.saturating_sub(indent + 2);
+        let body_width = configured_width.unwrap_or(72).max(20).min(available);
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DiscreetLogState {
-    page_start: TextPosition,
-    base_seconds: u32,
-    seed: u64,
-}
-
-impl DiscreetLogState {
-    pub(crate) fn new(book_id: &str, page_start: TextPosition) -> Self {
-        let now = OffsetDateTime::now_local().unwrap_or_else(|_| OffsetDateTime::now_utc());
-        let base_seconds =
-            u32::from(now.hour()) * 3600 + u32::from(now.minute()) * 60 + u32::from(now.second());
-        let entropy = SystemTime::now()
-            .duration_since(UNIX_EPOCH)
-            .unwrap_or_default()
-            .as_nanos() as u64;
-        let seed = mix64(
-            entropy
-                ^ stable_hash(book_id)
-                ^ (page_start.section_index as u64).rotate_left(17)
-                ^ page_start.char_offset as u64,
-        );
         Self {
-            page_start,
-            base_seconds,
-            seed,
+            header: Rect::new(area.x, area.y, area.width, head),
+            body: Rect::new(
+                area.x + indent.min(area.width),
+                area.y + head,
+                body_width,
+                body_height,
+            ),
+            footer: Rect::new(area.x, area.y + head + body_height, area.width, foot),
         }
     }
 
-    pub(crate) fn page_start(&self) -> TextPosition {
-        self.page_start
+    /// Net width available for text based on density.
+    /// Comfortable: full body width with 2 columns margin.
+    /// Inspect: retains space for line number (7 cols: `NNN │ `).
+    pub fn net_text_width(&self, density: AgentDensity) -> u16 {
+        match density {
+            AgentDensity::Comfortable => self.body.width.saturating_sub(2).max(20),
+            AgentDensity::Inspect => self.body.width.saturating_sub(7).max(20),
+        }
     }
 
-    pub(crate) fn prefixes(
-        &self,
-        lines: &[String],
-        mode: DiscreetPrefixMode,
-    ) -> Vec<Option<DiscreetLogPrefix>> {
-        if mode == DiscreetPrefixMode::None {
-            return vec![None; lines.len()];
-        }
+    /// Net visible lines available for verbatim prose.
+    /// Subtracts the "● Assistant" and "⎿ Output complete" marker rows.
+    pub fn net_text_height(&self) -> u16 {
+        self.body.height.saturating_sub(2).max(1)
+    }
+}
 
-        let mut timestamp = self.base_seconds;
-        let mut event_index = 0_u64;
-        lines
+#[derive(Debug)]
+pub(crate) struct ContextLine {
+    pub section: usize,
+    pub line: AnchoredLine,
+}
+
+impl ContextLine {
+    pub fn position(&self) -> TextPosition {
+        TextPosition::new(self.section, self.line.start_char)
+    }
+}
+
+#[derive(Debug, Default)]
+pub(crate) struct AgentViewport {
+    pub lines: Vec<ContextLine>,
+    pub top: usize,
+    pub context_rows: usize,
+    width: u16,
+}
+
+impl AgentViewport {
+    pub fn reflow(&mut self, sections: &[Section], width: u16, position: TextPosition) {
+        if self.width != width || self.lines.is_empty() {
+            self.lines = sections
+                .iter()
+                .enumerate()
+                .flat_map(|(section, source)| {
+                    wrap_text_with_layout(&source.text, usize::from(width.max(1)), true)
+                        .into_iter()
+                        .map(move |line| ContextLine { section, line })
+                })
+                .collect();
+            self.width = width;
+        }
+        let anchor = self
+            .lines
             .iter()
-            .enumerate()
-            .map(|(line_index, line)| {
-                if line.trim().is_empty() {
-                    return None;
-                }
-
-                if event_index > 0 {
-                    timestamp = (timestamp
-                        + (mix64(self.seed ^ event_index.rotate_left(23)) % 3) as u32)
-                        % 86_400;
-                }
-                let level = level_for_roll(
-                    (mix64(self.seed ^ line_index as u64 ^ event_index.rotate_left(41)) % 100)
-                        as u8,
-                );
-                event_index += 1;
-                Some(format_prefix(timestamp, level, mode))
-            })
-            .collect()
+            .rposition(|line| line.position() <= position)
+            .unwrap_or(0);
+        self.context_rows = usize::from(
+            self.context_rows > 0
+                && anchor > 0
+                && self.lines[anchor - 1].section == self.lines[anchor].section,
+        );
+        self.top = anchor.saturating_sub(self.context_rows);
     }
 
-    #[cfg(test)]
-    fn fixed(page_start: TextPosition, base_seconds: u32, seed: u64) -> Self {
-        Self {
-            page_start,
-            base_seconds,
-            seed,
-        }
+    pub fn visible(&self, height: u16) -> &[ContextLine] {
+        let start = self.top.min(self.lines.len());
+        &self.lines[start
+            ..start
+                .saturating_add(usize::from(height))
+                .min(self.lines.len())]
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) enum LogLevel {
-    Info,
-    Warn,
-    Error,
+#[derive(Debug, Clone, Copy, Default, PartialEq, Eq)]
+pub(crate) enum ReadDirection {
+    #[default]
+    Current,
+    Forward,
+    Backward,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(crate) struct DiscreetLogPrefix {
-    pub leading: String,
-    pub keyword: &'static str,
-    pub trailing: String,
-    pub level: LogLevel,
+/// A bounded summary of real operations, never copies of tool-output text.
+#[derive(Debug, Default)]
+pub(crate) struct AgentSession {
+    pub view: AgentViewport,
+    pub reads: usize,
+    pub resumed: bool,
+    pub direction: ReadDirection,
+    pub density: AgentDensity,
+    pub command: Option<String>,
+    pub help: bool,
+    pub help_offset: usize,
+    pub receipt: Option<&'static str>,
+    pub checkpoints: usize,
 }
 
-fn level_for_roll(roll: u8) -> LogLevel {
-    match roll {
-        0..=79 => LogLevel::Info,
-        80..=94 => LogLevel::Warn,
-        _ => LogLevel::Error,
+impl AgentSession {
+    pub fn record_read(&mut self, direction: ReadDirection) {
+        self.reads = self.reads.saturating_add(1);
+        self.direction = direction;
+        self.receipt = None;
     }
-}
-
-fn format_prefix(seconds: u32, level: LogLevel, mode: DiscreetPrefixMode) -> DiscreetLogPrefix {
-    let hour = seconds / 3600;
-    let minute = seconds % 3600 / 60;
-    let second = seconds % 60;
-    let (leading, keyword) = match mode {
-        DiscreetPrefixMode::Full => (
-            format!("{hour:02}:{minute:02}:{second:02} "),
-            match level {
-                LogLevel::Info => "INFO",
-                LogLevel::Warn => "WARN",
-                LogLevel::Error => "ERROR",
-            },
-        ),
-        DiscreetPrefixMode::Compact => (
-            format!("{minute:02}:{second:02} "),
-            match level {
-                LogLevel::Info => "I",
-                LogLevel::Warn => "W",
-                LogLevel::Error => "E",
-            },
-        ),
-        DiscreetPrefixMode::Minimal => (
-            String::new(),
-            match level {
-                LogLevel::Info => "I",
-                LogLevel::Warn => "W",
-                LogLevel::Error => "E",
-            },
-        ),
-        DiscreetPrefixMode::None => (String::new(), ""),
-    };
-    let used_width = leading.len().saturating_add(keyword.len());
-    DiscreetLogPrefix {
-        leading,
-        keyword,
-        trailing: " ".repeat(usize::from(mode.width()).saturating_sub(used_width)),
-        level,
-    }
-}
-
-fn stable_hash(value: &str) -> u64 {
-    value.bytes().fold(0xcbf2_9ce4_8422_2325, |hash, byte| {
-        (hash ^ u64::from(byte)).wrapping_mul(0x0000_0100_0000_01b3)
-    })
-}
-
-fn mix64(mut value: u64) -> u64 {
-    value = value.wrapping_add(0x9e37_79b9_7f4a_7c15);
-    value = (value ^ (value >> 30)).wrapping_mul(0xbf58_476d_1ce4_e5b9);
-    value = (value ^ (value >> 27)).wrapping_mul(0x94d0_49bb_1331_11eb);
-    value ^ (value >> 31)
 }
 
 #[cfg(test)]
@@ -289,102 +230,32 @@ mod tests {
     use super::*;
 
     #[test]
-    fn layout_adapts_without_sacrificing_reading_floor() {
-        let full = discreet_layout(Rect::new(0, 0, 81, 24), None);
-        assert_eq!(full.prefix_mode, DiscreetPrefixMode::Full);
-        assert_eq!(full.body_width, 64);
-
-        let compact = discreet_layout(Rect::new(0, 0, 74, 24), None);
-        assert_eq!(compact.prefix_mode, DiscreetPrefixMode::Compact);
-        assert_eq!(compact.body_width, 64);
-
-        let minimal = discreet_layout(Rect::new(0, 0, 73, 24), None);
-        assert_eq!(minimal.prefix_mode, DiscreetPrefixMode::Minimal);
-        assert_eq!(minimal.body_width, 64);
-
-        let floor = discreet_layout(Rect::new(0, 0, 52, 24), None);
-        assert_eq!(floor.prefix_mode, DiscreetPrefixMode::Minimal);
-        assert_eq!(floor.body_width, 48);
-
-        let narrow = discreet_layout(Rect::new(0, 0, 51, 24), None);
-        assert_eq!(narrow.prefix_mode, DiscreetPrefixMode::Minimal);
-        assert_eq!(narrow.body_width, 47);
-
-        let extreme = discreet_layout(Rect::new(0, 0, 4, 24), None);
-        assert_eq!(extreme.prefix_mode, DiscreetPrefixMode::None);
-        assert_eq!(extreme.body_width, 2);
-
-        for width in 1..=160 {
-            let layout = discreet_layout(Rect::new(0, 0, width, 24), None);
-            assert!(layout.total_width() <= width.saturating_sub(2).max(1));
-        }
-    }
-
-    #[test]
-    fn log_prefixes_are_stable_and_mark_every_nonempty_physical_line() {
-        let state = DiscreetLogState::fixed(TextPosition::new(0, 0), 13 * 3600 + 21 * 60 + 6, 7);
-        let lines = vec![
-            "first".to_string(),
-            "continuation".to_string(),
-            String::new(),
-            "next paragraph".to_string(),
-        ];
-
-        let first = state.prefixes(&lines, DiscreetPrefixMode::Full);
-        let second = state.prefixes(&lines, DiscreetPrefixMode::Full);
-
-        assert_eq!(first, second);
-        assert!(first[0]
-            .as_ref()
-            .is_some_and(|prefix| prefix.leading == "13:21:06 "));
-        assert!(first[1].is_some());
-        assert!(first[2].is_none());
-        assert!(first[3].is_some());
-        for prefix in first.into_iter().flatten() {
-            assert_eq!(
-                prefix.leading.len() + prefix.keyword.len() + prefix.trailing.len(),
-                usize::from(FULL_PREFIX_WIDTH)
-            );
-            assert!(matches!(prefix.keyword, "INFO" | "WARN" | "ERROR"));
-        }
-    }
-
-    #[test]
-    fn log_level_distribution_boundaries_are_exact() {
-        assert_eq!(level_for_roll(0), LogLevel::Info);
-        assert_eq!(level_for_roll(79), LogLevel::Info);
-        assert_eq!(level_for_roll(80), LogLevel::Warn);
-        assert_eq!(level_for_roll(94), LogLevel::Warn);
-        assert_eq!(level_for_roll(95), LogLevel::Error);
-        assert_eq!(level_for_roll(99), LogLevel::Error);
-    }
-
-    #[test]
-    fn structured_prefixes_fill_each_adaptive_width() {
-        for (mode, width) in [
-            (DiscreetPrefixMode::Full, FULL_PREFIX_WIDTH),
-            (DiscreetPrefixMode::Compact, COMPACT_PREFIX_WIDTH),
-            (DiscreetPrefixMode::Minimal, MINIMAL_PREFIX_WIDTH),
+    fn layout_matches_approved_grid_and_never_escapes_viewport() {
+        for (w, h, head, body, foot, cols, net_text) in [
+            (80, 24, 4, 17, 3, 72, 15),
+            (120, 30, 4, 18, 3, 72, 16),
+            (60, 18, 2, 14, 2, 54, 12),
         ] {
-            for level in [LogLevel::Info, LogLevel::Warn, LogLevel::Error] {
-                let prefix = format_prefix(13 * 3600 + 21 * 60 + 6, level, mode);
-                assert_eq!(
-                    prefix.leading.len() + prefix.keyword.len() + prefix.trailing.len(),
-                    usize::from(width)
-                );
-            }
+            let l = AgentLayout::new(Rect::new(0, 0, w, h), None);
+            assert_eq!(
+                (
+                    l.header.height,
+                    l.body.height,
+                    l.footer.height,
+                    l.body.width,
+                    l.net_text_height()
+                ),
+                (head, body, foot, cols, net_text)
+            );
+            assert!(l.net_text_height() >= 10 && l.net_text_height() <= 16);
         }
-    }
-
-    #[test]
-    fn stack_is_fixed_neutral_and_redacted() {
-        let stack = discreet_stack();
-
-        assert!(stack.contains("TypeError"));
-        assert!(stack.contains("resolveActiveSession"));
-        assert!(stack.contains("react-dom"));
-        for forbidden in ["Privacy", "Discreet", "Reader", "Book", "secret-title"] {
-            assert!(!stack.contains(forbidden));
+        for w in 0..=140 {
+            for h in 0..=40 {
+                let l = AgentLayout::new(Rect::new(0, 0, w, h), Some(100));
+                for area in [l.header, l.body, l.footer] {
+                    assert!(area.right() <= w && area.bottom() <= h);
+                }
+            }
         }
     }
 }

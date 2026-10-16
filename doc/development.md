@@ -78,8 +78,18 @@ that checkout can compile. Do not advertise a feature based only on a declaratio
 
 ## Documentation maintenance
 
-Keep user-facing setup in `README.md`, detailed behavior in `usage.md`, design
-boundaries in `architecture.md`, build/check instructions here, and coding-agent
-constraints in `../AGENTS.md`. Update the relevant document when changing a CLI
-command, shortcut, config key, persistence schema, or supported format. Avoid
-fixed module counts, copied dependency versions, and machine-specific paths.
+See [documentation index](README.md) for ownership and current-vs-target
+authority. Keep setup in [root README](../README.md), **implemented**
+commands and controls in [usage](usage.md), technical invariants in
+[architecture](architecture.md), build/check instructions here, and agent
+work constraints in [AGENTS.md](../AGENTS.md).
+
+The [Agent Terminal design contract](design/agent-terminal-reading.md)
+defines **future UX acceptance**. Historical experiments and implementation
+records live under [notes](notes/阅读体验优化讨论.md) and must not become
+requirements by accident. Update tests when the contract deliberately
+supersedes old layouts; a passing old snapshot may be the wrong target.
+
+For new features, verify actual code before describing them as available.
+Maintain relative links and avoid duplicating the same rules across
+README, usage, architecture, and design documents.

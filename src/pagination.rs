@@ -134,6 +134,7 @@ fn paginate_with_exact_content_dimensions(
     )
 }
 
+#[cfg(test)]
 pub(crate) fn paginate_discreet(
     sections: &[Section],
     content_width: u16,
@@ -282,7 +283,11 @@ pub fn wrap_text_anchored(text: &str, width: usize) -> Vec<AnchoredLine> {
     wrap_text_with_layout(text, width, false)
 }
 
-fn wrap_text_with_layout(text: &str, width: usize, natural_breaks: bool) -> Vec<AnchoredLine> {
+pub(crate) fn wrap_text_with_layout(
+    text: &str,
+    width: usize,
+    natural_breaks: bool,
+) -> Vec<AnchoredLine> {
     let width = width.max(1);
     let mut lines = Vec::new();
     let mut raw_start_char = 0;

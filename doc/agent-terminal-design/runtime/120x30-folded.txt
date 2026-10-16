@@ -1,0 +1,30 @@
+❯ Process CJK text corpus in corpus/zh_sample.txt                                                                       
+● Session paused · Output folded (corpus/zh_sample.txt)                                                                 
+    Press F12 to resume inspection.                                                                                     
+                                                                                                                        
+      [Tool output folded · press F12 to resume]                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+  corpus/zh_sample.txt · session paused                                                                                 
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 
+❯ [session paused]                                                                                                      
+  F12 resume · Ctrl+C exit                                                                                              

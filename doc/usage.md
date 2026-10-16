@@ -71,8 +71,8 @@ requests removal of the book file, subject to the managed-folder checks in
 | `o` | Toggle page overlap context (1-line context on page turn) |
 | `M` | Show book information |
 | `s` | Show or hide reading progress |
-| `p` | Toggle Discreet Mode |
-| `F12` | Hide behind diagnostics / return |
+| `p` | Toggle Agent Terminal Mode (legacy Discreet Mode) |
+| `F12` | Fold reading output / return |
 | `?` / `F1` | Show available shortcuts |
 | `q` / `Ctrl+C` | Save and quit |
 
@@ -112,17 +112,27 @@ percentage, and text snippet. Navigate with `j`/`k`/arrows, press `Enter` to jum
 to the bookmark, press `d` to delete the selected bookmark, or `Esc` to close.
 
 
-Discreet Mode displays redacted diagnostic decoration and provides a reduced
-set of controls. Hidden mode displays diagnostics; press `F12` to return. Use
-in-app help to see the controls available in the current mode.
+## Agent Terminal Mode (current implementation)
 
-Discreet reading keeps a left-aligned text column with fixed-width log prefixes.
-Level keywords retain their terminal colors with a dim style; body text keeps
-the terminal foreground. At widths of at least 24 columns, wrapping prefers
-legal punctuation breaks within the final one-eighth of the line, keeping
-earlier pauses compact. Smaller widths use the normal Unicode wrapping rules.
-Display lines are rendered directly from pagination, preserving indentation
-and source positions without a second wrapping pass.
+Press `p` to toggle the experimental Agent Terminal view (stored under the
+legacy `discreet_mode` configuration key).
+
+**Currently implemented in this branch:** a locally simulated, fixed-format
+session header and Read label; one large paginated block of book text as
+tool-like output; a displayed physical line range; and a **noninteractive**
+`❯ _` prompt. The labels are placeholders, no AI model is invoked, and
+the displayed Read label is not a tool execution. Supported `j` / `k`
+navigation remains screen-based. There is no conversational message history,
+interactive Agent command parser, or streaming response.
+
+Press `F12` to fold visible book text into a simulated idle transcript and
+press it again to restore it. Reader metadata and queries are not shown in
+the folded terminal view, but visible source text can still be seen before
+folding. This is not a privacy or security boundary.
+
+The **next UX target**, including meaningful event-to-action mapping and
+bounded response chunks, is [Agent Terminal design](design/agent-terminal-reading.md).
+That file is a target, not a claim of implemented behavior.
 
 ## Shelf controls
 

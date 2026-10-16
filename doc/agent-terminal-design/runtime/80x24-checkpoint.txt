@@ -1,0 +1,24 @@
+❯ Process CJK text corpus in corpus/zh_sample.txt                               
+● Inspecting the next segment of corpus/zh_sample.txt.                          
+  Resume · restored checkpoint at line 3 (1 folded) · checkpoint #1 durable     
+  ● read_file path="corpus/zh_sample.txt" offset=3 limit=16                     
+                                                                                
+    　　桥头的灯还亮着。那家小店没有挂出招牌，门口只有一张旧桌子，桌上放着几    
+    只洗净的杯子。他记得从前来过这里，却想不起那时同行的人说过什么。            
+                                                                                
+    　　“今天还过河吗？”老人问。他没有立刻回答，只把口袋里的信拿出来，          
+    又仔细折回原来的样子。纸角已经磨软，折痕处透出细细的一线白。                
+                                                                                
+    　　水面缓慢地向下游移动。几片叶子绕过桥墩，在打转的地方停了片刻，          
+    然后散开。他看着它们，忽然觉得自己也可以再等一会儿，不必马上决定去向。      
+                                                                                
+    　　老人把杯子推到他面前，说早上的船还没有来。杯里的热气升起又散去，        
+    窗外的天色一点点明亮起来，河对岸的树也渐渐有了清楚的轮廓。                  
+                                                                                
+    　　他坐下来，把信放在桌边。昨夜想好的话，这时一句也没有说出口。            
+    街上有人骑车经过，铃声短促地响了两下，很快便被水声盖住了。                  
+                                                                                
+  ✓ Checkpoint saved · lines 3-18                                               
+─────────────────────────────────────────────────────────────────────────────── 
+❯ :help for commands                                                            
+  density: comfortable · session: local · target: corpus/zh_sample.txt          

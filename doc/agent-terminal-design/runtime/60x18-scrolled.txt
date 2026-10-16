@@ -1,0 +1,18 @@
+❯ Process CJK text corpus in corpus/zh_sample.txt           
+  ● read_file path="corpus/zh_sample.txt" offset=3 limit=11 
+  Resume · restored checkpoint at line 3 (1 folded)         
+    鞋底带起一点潮湿的泥土。                                
+                                                            
+    　　桥头的灯还亮着。那家小店没有挂出招牌，门口只有一张  
+    旧桌子，桌上放着几只洗净的杯子。他记得从前来过这里，    
+    却想不起那时同行的人说过什么。                          
+                                                            
+    　　“今天还过河吗？”老人问。他没有立刻回答，只把口袋里  
+    的信拿出来，又仔细折回原来的样子。纸角已经磨软，        
+    折痕处透出细细的一线白。                                
+                                                            
+    　　水面缓慢地向下游移动。几片叶子绕过桥墩，在打转的地  
+  corpus/zh_sample.txt · lines 3-13/312 (1%) · local        
+─────────────────────────────────────────────────────────── 
+❯ :help                                                     
+  density: comfortable · session: local · target: corpus/zh_

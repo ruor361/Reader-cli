@@ -13,6 +13,7 @@ pub mod privacy;
 mod reader_input;
 mod reader_state;
 mod reader_view;
+mod reader_writer;
 pub mod reading_data;
 pub mod shelf;
 pub mod storage;

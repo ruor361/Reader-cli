@@ -6,7 +6,9 @@ These instructions apply to this repository. Reader is a single Rust crate
 with a CLI and Ratatui reader/bookshelf for EPUB, TXT, and text-based PDF books.
 Run Cargo commands from the directory containing `Cargo.toml`.
 
-Read only the documentation needed for the task:
+Start from the [documentation index](doc/README.md) and read only what the task requires:
+
+- [Agent Terminal design target](doc/design/agent-terminal-reading.md): normative UX direction; not yet shipped.
 
 - [README.md](README.md): user-facing overview and first-run setup.
 - [doc/usage.md](doc/usage.md): commands, controls, configuration, and data.
@@ -17,6 +19,36 @@ Read only the documentation needed for the task:
 Treat the source as authoritative. Verify CLI behavior in both `src/cli.rs`
 and `src/main.rs`; a declaration alone does not establish a working feature.
 Dependency versions belong in `Cargo.toml`/`Cargo.lock`, not duplicated here.
+
+## Product contract and documentation precedence
+
+For Agent Terminal Mode, **low exposure and sustained reading comfort have
+equal priority**. The terminal should resemble an authentic coding-agent
+conversation at a glance; never optimize toward a log viewer or an e-book
+page with only a static agent header.
+
+- [Agent reading design](doc/design/agent-terminal-reading.md) is the
+  authoritative **target UX** and acceptance contract.
+- [Usage](doc/usage.md) and source/tests describe **currently implemented**
+  behavior. Source is authoritative for what really works, not for the
+  desired future experience.
+- [Architecture](doc/architecture.md) defines technical boundaries and
+  persisted data invariants.
+- [Historical notes](doc/notes/阅读体验优化讨论.md) preserve old ideas and
+  implementation reports; they are **not requirements**.
+
+When changing Agent Mode, review tests that encode old layout assumptions:
+passing such tests does not prove the new UX is correct. Keep a clear line
+between planned and shipped features; do not advertise an editable prompt
+unless its input is implemented. Agent transcript UI is local simulation,
+not a real LLM. Avoid fake tool work, arbitrary activity, decorative
+timestamps, and repeated log prefixes. If showing local Read events,
+tie them to real Reader state.
+
+Retain exact Unicode `TextPosition` anchors across chunks, resize, navigation
+and fold/unfold. Folded chrome must not expose title, search queries, private
+paths or source text. Visible prose can still be read by bystanders: never
+represent this as a security boundary.
 
 ## Working conventions
 
@@ -48,8 +80,9 @@ Dependency versions belong in `Cargo.toml`/`Cargo.lock`, not duplicated here.
   and reading-session paths.
 - Add reader/shelf shortcuts through their binding registries so input, HUD,
   and help stay consistent. Inherit terminal colors through `src/ui.rs`.
-- Discreet/hidden diagnostics must not expose real book metadata or search
-  queries. `src/privacy.rs` is deprecated compatibility code.
+- Agent/Discreet and folded chrome must not expose real book metadata,
+  search queries, or private filesystem paths. `src/privacy.rs` is deprecated
+  compatibility code.
 - Preserve compatibility aliases: `add`, `shelf refresh`, and legacy
   `privacy_mode` configuration input.
 
@@ -68,7 +101,9 @@ insert `+stable-x86_64-pc-windows-gnu` immediately after `cargo`; do not change
 the repository target or global default toolchain to solve a local setup issue.
 
 For documentation-only changes, check local links, fenced examples, and claims
-against source. Compilation is only needed when it helps validate the change.
+against source. Flag current-vs-target differences. Compilation is only needed
+when it helps validate the change. For Agent UX, verify the mockup, glance test,
+reading comfort, folding, and exact source anchors from the design contract.
 Update the relevant documentation when commands, keys, configuration, or data
 behavior changes. Report what changed, what was verified, and any existing
 blocker; do not present unimplemented declarations as completed functionality.

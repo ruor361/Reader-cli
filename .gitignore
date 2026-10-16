@@ -26,3 +26,6 @@ Desktop.ini
 .env
 .env.*
 !.env.example
+
+# Local patches
+*.patch

@@ -23,7 +23,7 @@ bookmarks, stable reading progress, and portable reading data.
 - Managed imports that preserve source files and deduplicate identical content
 - Portable metadata sidecars and reading journals for folder synchronization
 - Reading-event export as JSON or CSV
-- Terminal-inherited colors, optional reading width, and Discreet Mode
+- Terminal-inherited colors, optional reading width, and Agent Terminal Reading Mode (Discreet Mode)
 
 ## Supported formats
 

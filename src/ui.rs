@@ -5,23 +5,6 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 use unicode_width::UnicodeWidthStr;
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub(crate) struct DiscreetLogColors {
-    pub info: Color,
-    pub warning: Color,
-    pub error: Color,
-}
-
-impl DiscreetLogColors {
-    pub(crate) const fn terminal() -> Self {
-        Self {
-            info: Color::Green,
-            warning: Color::Yellow,
-            error: Color::Red,
-        }
-    }
-}
-
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
     pub background: Color,
@@ -385,13 +368,5 @@ mod tests {
         assert_eq!(palette.background, Color::Reset);
         assert_eq!(palette.body, Color::Reset);
         assert_eq!(palette.muted, Color::DarkGray);
-    }
-
-    #[test]
-    fn semantic_colors_use_the_terminal_ansi_palette() {
-        let colors = DiscreetLogColors::terminal();
-        assert_eq!(colors.info, Color::Green);
-        assert_eq!(colors.warning, Color::Yellow);
-        assert_eq!(colors.error, Color::Red);
     }
 }

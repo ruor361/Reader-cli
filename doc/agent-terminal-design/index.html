@@ -1,0 +1,20 @@
+<!doctype html><html lang="zh-CN"><meta charset="utf-8"><meta name="viewport" content="width=device-width,initial-scale=1"><title>Reader-cli · Agent Terminal 设计审阅</title><style>body{margin:32px;font:16px/1.7 system-ui,sans-serif;background:#f2f3f4;color:#222}main{max-width:1550px;margin:auto}h1{font-size:28px}h2{margin-top:48px}nav{position:sticky;top:0;background:#f2f3f4;padding:12px 0}a{color:#236775;margin-right:20px}figure{margin:24px 0}img{display:block;max-width:100%;height:auto}figcaption{margin-bottom:8px}small{color:#555}.row{display:grid;grid-template-columns:1fr 1fr;gap:24px}@media(max-width:1000px){.row{display:block}}</style><main><h1>Reader-cli · Agent Terminal 设计审阅</h1><p>第一阶段 / 待批准。以下是按终端字符网格绘制的设计样稿，并非运行截图。正文为原创样例，所有状态均为明确的演示情景。</p><nav><a href="#s80x24">80×24</a><a href="#s120x30">120×30</a><a href="#s60x18">60×18</a><a href="#light">浅色终端</a><a href="DESIGN.md">完整设计方案</a></nav>
+<h2 id="s80x24">80×24 · 四种状态</h2><p>按顺序：恢复保存位置 → j 下移两行 → b 保存当前位置 → F12 折叠。Checkpoint 不改变正文布局。</p><div class="row">
+<figure><figcaption>正常阅读 / 恢复位置 <a href="80x24-reading.png">原尺寸图片</a><a href="80x24-reading.txt">字符网格</a></figcaption><img src="80x24-reading.png" alt="80x24 正常阅读 / 恢复位置"></figure>
+<figure><figcaption>滚动后 / j 下移 2 行 <a href="80x24-scrolled.png">原尺寸图片</a><a href="80x24-scrolled.txt">字符网格</a></figcaption><img src="80x24-scrolled.png" alt="80x24 滚动后 / j 下移 2 行"></figure>
+<figure><figcaption>Checkpoint / b 保存成功 <a href="80x24-checkpoint.png">原尺寸图片</a><a href="80x24-checkpoint.txt">字符网格</a></figcaption><img src="80x24-checkpoint.png" alt="80x24 Checkpoint / b 保存成功"></figure>
+<figure><figcaption>F12 / 全屏折叠 <a href="80x24-folded.png">原尺寸图片</a><a href="80x24-folded.txt">字符网格</a></figcaption><img src="80x24-folded.png" alt="80x24 F12 / 全屏折叠"></figure>
+</div>
+<h2 id="s120x30">120×30 · 四种状态</h2><p>按顺序：恢复保存位置 → j 下移两行 → b 保存当前位置 → F12 折叠。Checkpoint 不改变正文布局。</p><div class="row">
+<figure><figcaption>正常阅读 / 恢复位置 <a href="120x30-reading.png">原尺寸图片</a><a href="120x30-reading.txt">字符网格</a></figcaption><img src="120x30-reading.png" alt="120x30 正常阅读 / 恢复位置"></figure>
+<figure><figcaption>滚动后 / j 下移 2 行 <a href="120x30-scrolled.png">原尺寸图片</a><a href="120x30-scrolled.txt">字符网格</a></figcaption><img src="120x30-scrolled.png" alt="120x30 滚动后 / j 下移 2 行"></figure>
+<figure><figcaption>Checkpoint / b 保存成功 <a href="120x30-checkpoint.png">原尺寸图片</a><a href="120x30-checkpoint.txt">字符网格</a></figcaption><img src="120x30-checkpoint.png" alt="120x30 Checkpoint / b 保存成功"></figure>
+<figure><figcaption>F12 / 全屏折叠 <a href="120x30-folded.png">原尺寸图片</a><a href="120x30-folded.txt">字符网格</a></figcaption><img src="120x30-folded.png" alt="120x30 F12 / 全屏折叠"></figure>
+</div>
+<h2 id="s60x18">60×18 · 四种状态</h2><p>按顺序：恢复保存位置 → j 下移两行 → b 保存当前位置 → F12 折叠。Checkpoint 不改变正文布局。</p><div class="row">
+<figure><figcaption>正常阅读 / 恢复位置 <a href="60x18-reading.png">原尺寸图片</a><a href="60x18-reading.txt">字符网格</a></figcaption><img src="60x18-reading.png" alt="60x18 正常阅读 / 恢复位置"></figure>
+<figure><figcaption>滚动后 / j 下移 2 行 <a href="60x18-scrolled.png">原尺寸图片</a><a href="60x18-scrolled.txt">字符网格</a></figcaption><img src="60x18-scrolled.png" alt="60x18 滚动后 / j 下移 2 行"></figure>
+<figure><figcaption>Checkpoint / b 保存成功 <a href="60x18-checkpoint.png">原尺寸图片</a><a href="60x18-checkpoint.txt">字符网格</a></figcaption><img src="60x18-checkpoint.png" alt="60x18 Checkpoint / b 保存成功"></figure>
+<figure><figcaption>F12 / 全屏折叠 <a href="60x18-folded.png">原尺寸图片</a><a href="60x18-folded.txt">字符网格</a></figcaption><img src="60x18-folded.png" alt="60x18 F12 / 全屏折叠"></figure>
+</div>
+<h2 id="light">浅色终端配色映射</h2><p>正文、背景使用终端默认色；样稿颜色只是两种终端主题示例。</p><img src="80x24-light.png" alt="80×24 浅色示例"><p>样稿无在线字体、脚本或网络请求。第二阶段再使用 Ratatui 和真实终端逐项对照。</p></main></html>

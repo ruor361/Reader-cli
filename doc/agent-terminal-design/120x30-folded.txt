@@ -1,0 +1,30 @@
+❯ Keep the current context.                                                                                             
+● Output folded; position retained.                                                                                     
+  ▸ Read workspace/context.txt                                                                                          
+    Output folded                                                                                                       
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+                                                                                                                        
+  Context · suspended                                                                                                   
+─────────────────────────────────────────────────────────────────────────────────────────────────────────────────────── 
+❯ [input suspended]                                                                                                     
+  F12 restore · Ctrl+C exit                                                                                             

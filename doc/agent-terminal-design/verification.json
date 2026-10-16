@@ -1,0 +1,11 @@
+{
+  "scope": "Static design artifacts only; no Rust/runtime/terminal acceptance performed",
+  "terminal_mockups": 12,
+  "exact_grid_dimensions": "pass",
+  "png_dimensions": "pass",
+  "scroll_two_rows": "pass",
+  "checkpoint_body_stability": "pass",
+  "folded_mockup_redaction": "pass",
+  "local_link_checks": 74,
+  "markdown_fences": "pass"
+}

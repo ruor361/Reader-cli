@@ -7,8 +7,9 @@ use ratatui::layout::Rect;
 use crate::book::BookDocument;
 use crate::config::ReaderConfig;
 use crate::reader_input::action_for_key;
-use crate::reader_state::{NotificationKind, ReaderAction, ReaderEffect, ReaderState};
-use crate::reading_data::{ReadingDataStore, SessionCheckpoint, SessionTracker};
+use crate::reader_state::{NotificationKind, Overlay, ReaderAction, ReaderEffect, ReaderState};
+use crate::reader_writer::{ReaderWriter, WriteCommand};
+use crate::reading_data::{ReadingDataStore, SessionTracker};
 use crate::storage::Store;
 
 struct TerminalGuard;
@@ -26,6 +27,16 @@ pub fn run_reader(
     config: &mut ReaderConfig,
 ) -> Result<()> {
     let data = ReadingDataStore::open_default(config)?;
+    run_reader_with_data(document, book_id, store, config, data)
+}
+
+fn run_reader_with_data(
+    document: BookDocument,
+    book_id: String,
+    store: &mut Store,
+    config: &mut ReaderConfig,
+    data: ReadingDataStore,
+) -> Result<()> {
     let sync_report = data.synchronize_store(store)?;
     for warning in sync_report.warnings {
         eprintln!("warning: {warning}");
@@ -42,6 +53,10 @@ pub fn run_reader(
     store.update_document_metrics(&book_id, &document);
     let saved = store.progress_for(&book_id).copied().unwrap_or_default();
     let bookmarks = store.bookmarks_for(&book_id).to_vec();
+    let restored = store
+        .book_by_id(&book_id)
+        .is_some_and(|book| book.last_opened.is_some())
+        || saved.position != crate::book::TextPosition::default();
     store.record_open(&book_id);
     let mut state = ReaderState::new(
         document,
@@ -51,182 +66,177 @@ pub fn run_reader(
         saved,
         bookmarks,
     );
-    let monotonic_now = Instant::now();
+    // A library entry always has a default Progress, so presence of that
+    // field alone does not prove that this is a resumed reading session.
+    state.agent.resumed = restored;
+    let writer = ReaderWriter::start(store.clone(), config.clone(), data, state.book_id.clone())
+        .map_err(|_| anyhow::anyhow!("Unable to start local persistence"))?;
     let (mut session, initial_checkpoint) = SessionTracker::start(
         state.book_id.clone(),
         state.position,
         time::OffsetDateTime::now_utc(),
-        monotonic_now,
+        Instant::now(),
     );
-    persist_session_checkpoint(&data, &initial_checkpoint, &mut state)?;
-    persist_book_state(&mut state, store)?;
+    enqueue(
+        &writer,
+        WriteCommand::Session(initial_checkpoint),
+        &mut state,
+    );
+    enqueue(
+        &writer,
+        WriteCommand::Progress(state.current_progress()),
+        &mut state,
+    );
     let mut exit = false;
 
     while !exit {
-        let monotonic_now = Instant::now();
-        state.expire_notification(monotonic_now);
-        if let Some(checkpoint) = session.tick(
-            state.position,
-            time::OffsetDateTime::now_utc(),
-            monotonic_now,
-        ) {
-            persist_session_checkpoint(&data, &checkpoint, &mut state)?;
+        apply_receipts(&writer, &mut state);
+        let now = Instant::now();
+        if !state.config.discreet_mode {
+            state.expire_notification(now);
+        }
+        if let Some(checkpoint) = session.tick(state.position, time::OffsetDateTime::now_utc(), now)
+        {
+            enqueue(&writer, WriteCommand::Session(checkpoint), &mut state);
         }
         terminal.draw(|frame| crate::reader_view::draw(frame, &state))?;
-        if !event::poll(Duration::from_millis(100))? {
+        if !event::poll(Duration::from_millis(50))? {
             continue;
         }
-
         match event::read()? {
             Event::Key(key) if should_handle_key_event(key) => {
                 let action = action_for_key(key, &state);
                 let was_hidden = state.hidden;
-                let wall_now = time::OffsetDateTime::now_utc();
-                let monotonic_now = Instant::now();
-
-                if matches!(action, ReaderAction::ToggleHidden) && !was_hidden {
-                    if let Some(checkpoint) =
-                        session.finish(state.position, wall_now, monotonic_now)
-                    {
-                        persist_session_checkpoint(&data, &checkpoint, &mut state)?;
-                    }
-                } else if !was_hidden && !matches!(action, ReaderAction::None) {
-                    if let Some(checkpoint) =
-                        session.on_activity(state.position, wall_now, monotonic_now)
-                    {
-                        persist_session_checkpoint(&data, &checkpoint, &mut state)?;
-                    }
-                }
-
                 let previous_position = state.position;
                 let effects = state.update(action);
-                exit = apply_effects(effects, &mut state, store, config, &data)?;
-
-                if matches!(action, ReaderAction::ToggleHidden) && was_hidden && !state.hidden {
-                    if let Some(checkpoint) = session.on_activity(
-                        state.position,
-                        time::OffsetDateTime::now_utc(),
-                        Instant::now(),
-                    ) {
-                        persist_session_checkpoint(&data, &checkpoint, &mut state)?;
+                // Also catches :fold, not just the physical F12 key. No disk
+                // work, session finalization or notification precedes this frame.
+                if state.hidden && !was_hidden {
+                    terminal.clear()?;
+                    terminal.draw(|frame| crate::reader_view::draw(frame, &state))?;
+                }
+                let wall = time::OffsetDateTime::now_utc();
+                let now = Instant::now();
+                let checkpoint = if state.hidden && !was_hidden {
+                    session.finish(state.position, wall, now)
+                } else if !state.hidden && (was_hidden || !matches!(action, ReaderAction::None)) {
+                    session.on_activity(previous_position, wall, now)
+                } else {
+                    None
+                };
+                if let Some(checkpoint) = checkpoint {
+                    enqueue(&writer, WriteCommand::Session(checkpoint), &mut state);
+                }
+                for effect in effects {
+                    match effect {
+                        ReaderEffect::SaveProgress(progress) => {
+                            enqueue(&writer, WriteCommand::Progress(progress), &mut state);
+                        }
+                        ReaderEffect::SaveConfig => {
+                            enqueue(
+                                &writer,
+                                WriteCommand::Config(state.config.clone()),
+                                &mut state,
+                            );
+                        }
+                        ReaderEffect::AddBookmark { label, progress } => {
+                            state.agent.receipt = Some("Checkpoint saving");
+                            enqueue(&writer, WriteCommand::Add { label, progress }, &mut state);
+                        }
+                        ReaderEffect::DeleteBookmark { id, removed, index } => {
+                            if !writer.enqueue(WriteCommand::Delete(id)) {
+                                let insert_at = index.min(state.bookmarks.len());
+                                state.bookmarks.insert(insert_at, removed);
+                                if let Overlay::Bookmarks(navigator) = &mut state.overlay {
+                                    navigator.selection = insert_at;
+                                }
+                                state.agent.receipt = Some("Save queue busy; retry the command");
+                                if !state.hidden && !state.config.discreet_mode {
+                                    state.notify(
+                                        "Save queue busy; retry the command",
+                                        NotificationKind::Error,
+                                    );
+                                }
+                            }
+                        }
+                        ReaderEffect::Exit => {
+                            exit = true;
+                        }
                     }
-                } else if exit {
-                    if let Some(checkpoint) = session.finish(
-                        state.position,
-                        time::OffsetDateTime::now_utc(),
-                        Instant::now(),
-                    ) {
-                        persist_session_checkpoint(&data, &checkpoint, &mut state)?;
-                    }
-                } else if state.position != previous_position {
-                    if let Some(checkpoint) = session.checkpoint(
-                        state.position,
-                        time::OffsetDateTime::now_utc(),
-                        Instant::now(),
-                        true,
-                    ) {
-                        persist_session_checkpoint(&data, &checkpoint, &mut state)?;
+                }
+                if !state.hidden && state.position != previous_position {
+                    if let Some(checkpoint) = session.checkpoint(state.position, wall, now, true) {
+                        enqueue(&writer, WriteCommand::Session(checkpoint), &mut state);
                     }
                 }
             }
-            Event::Resize(width, height) => state.resize(width, height),
+            Event::Resize(width, height) => {
+                state.resize(width, height);
+                if state.hidden {
+                    terminal.clear()?;
+                }
+            }
             _ => {}
         }
     }
-
-    store.set_progress(&state.book_id, state.current_progress());
-    persist_book_state(&mut state, store)?;
+    if let Some(checkpoint) = session.finish(
+        state.position,
+        time::OffsetDateTime::now_utc(),
+        Instant::now(),
+    ) {
+        enqueue(&writer, WriteCommand::Session(checkpoint), &mut state);
+    }
     *config = state.config.clone();
-    config.save()?;
-    Ok(())
-}
-
-fn apply_effects(
-    effects: Vec<ReaderEffect>,
-    state: &mut ReaderState,
-    store: &mut Store,
-    config: &mut ReaderConfig,
-    data: &ReadingDataStore,
-) -> Result<bool> {
-    let mut exit = false;
-    for effect in effects {
-        match effect {
-            ReaderEffect::SaveProgress(progress) => {
-                store.set_progress(&state.book_id, progress);
-                persist_book_state(state, store)?;
-            }
-            ReaderEffect::SaveConfig => {
-                *config = state.config.clone();
-                config.save()?;
-            }
-            ReaderEffect::AddBookmark { label, progress } => {
-                let bookmark = store.add_bookmark(&state.book_id, label, progress)?;
-                let warnings = data.append_bookmark_add(&state.book_id, &bookmark)?;
-                state.bookmarks.push(bookmark.clone());
-                state.notify(
-                    if !warnings.is_empty() {
-                        "Bookmark saved locally; cloud sync is pending".to_string()
-                    } else if state.config.discreet_mode {
-                        "Bookmark saved".to_string()
-                    } else {
-                        format!(
-                            "Bookmark added: {}",
-                            bookmark.id.chars().take(12).collect::<String>()
-                        )
-                    },
-                    NotificationKind::Success,
-                );
-                persist_book_state(state, store)?;
-            }
-            ReaderEffect::DeleteBookmark { id } => {
-                if let Ok(removed) = store.delete_bookmark(&state.book_id, &id) {
-                    let warnings = data.append_bookmark_delete(&state.book_id, &removed.id)?;
-                    state.notify(
-                        if !warnings.is_empty() {
-                            "Bookmark deleted locally; cloud sync is pending".to_string()
-                        } else {
-                            format!(
-                                "Bookmark deleted: {}",
-                                removed.id.chars().take(12).collect::<String>()
-                            )
-                        },
-                        NotificationKind::Info,
-                    );
-                    persist_book_state(state, store)?;
-                }
-            }
-            ReaderEffect::Exit => exit = true,
-        }
+    let outcome = writer.finish(state.current_progress(), state.config.clone())?;
+    *store = outcome.store;
+    if !outcome.flushed {
+        anyhow::bail!("Local state could not be saved");
     }
-    Ok(exit)
-}
-
-fn persist_session_checkpoint(
-    data: &ReadingDataStore,
-    checkpoint: &SessionCheckpoint,
-    state: &mut ReaderState,
-) -> Result<()> {
-    let warnings = data.upsert_event(checkpoint)?;
-    if !warnings.is_empty() {
-        state.notify(
-            "Reading data saved locally; cloud sync is pending",
-            NotificationKind::Info,
-        );
+    if outcome.had_errors {
+        anyhow::bail!("A local save operation failed during this session");
     }
     Ok(())
 }
 
-fn persist_book_state(state: &mut ReaderState, store: &Store) -> Result<()> {
-    store.save()?;
-    if let Some(directory) = state.config.bookshelf_dir.clone() {
-        if crate::bookshelf::sync_sidecar_for_book(store, &state.book_id, &directory).is_err() {
+fn enqueue(writer: &ReaderWriter, command: WriteCommand, state: &mut ReaderState) {
+    if !writer.enqueue(command) {
+        state.agent.receipt = Some("Save queue busy; retry the command");
+        if !state.hidden && !state.config.discreet_mode {
             state.notify(
-                "Book state saved locally; sidecar sync is pending",
-                NotificationKind::Info,
+                "Save queue busy; retry the command",
+                NotificationKind::Error,
             );
         }
     }
-    Ok(())
+}
+
+fn apply_receipts(writer: &ReaderWriter, state: &mut ReaderState) {
+    for receipt in writer.receipts.try_iter() {
+        if let Some(bookmarks) = receipt.bookmarks {
+            state.bookmarks = bookmarks;
+        }
+        if receipt.checkpoint_saved {
+            state.agent.checkpoints = state.agent.checkpoints.saturating_add(1);
+        }
+        if receipt.text.is_empty() {
+            continue;
+        }
+        // Do not resurrect notifications after folding. Errors remain available
+        // as a neutral status on restore, but never enter the safe renderer.
+        if !state.hidden || receipt.error {
+            state.agent.receipt = Some(receipt.text);
+        }
+        if !state.hidden && !state.config.discreet_mode {
+            state.notify(
+                receipt.text,
+                if receipt.error {
+                    NotificationKind::Error
+                } else {
+                    NotificationKind::Success
+                },
+            );
+        }
+    }
 }
 
 fn should_handle_key_event(key: KeyEvent) -> bool {
@@ -237,6 +247,29 @@ fn should_handle_key_event(key: KeyEvent) -> bool {
 mod tests {
     use super::*;
     use crossterm::event::{KeyCode, KeyModifiers};
+
+    /// Real-terminal fixture: runs the production loop with entirely isolated
+    /// stores. The external ConPTY driver supplies keystrokes and screenshots.
+    #[test]
+    #[ignore = "interactive ConPTY fixture; requires READER_TERMINAL_FIXTURE"]
+    fn terminal_fixture() {
+        let root = std::path::PathBuf::from(
+            std::env::var_os("READER_TERMINAL_FIXTURE").expect("fixture directory"),
+        );
+        let document =
+            crate::book::load_book(root.join("SECRET_TITLE - SECRET_AUTHOR.txt")).unwrap();
+        let mut store = Store::open(root.join("library.json")).unwrap();
+        let id = store
+            .add_book(&document, &document.path)
+            .unwrap()
+            .id
+            .clone();
+        store.record_open(&id);
+        let mut config = ReaderConfig::open(root.join("configuration.json")).unwrap();
+        config.discreet_mode = true;
+        let data = ReadingDataStore::new(root.join("journal"), None);
+        run_reader_with_data(document, id, &mut store, &mut config, data).unwrap();
+    }
 
     #[test]
     fn only_key_presses_reach_the_state_machine() {

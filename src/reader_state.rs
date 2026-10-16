@@ -4,8 +4,8 @@ use ratatui::layout::Rect;
 
 use crate::book::{BookDocument, ContentMetrics, SearchResult, TextPosition};
 use crate::config::ReaderConfig;
-use crate::discreet::{discreet_layout, DiscreetLogState};
-use crate::pagination::{page_for_position, paginate_discreet, paginate_with_options, Page};
+use crate::discreet::{AgentDensity, AgentLayout, AgentSession, ReadDirection};
+use crate::pagination::{page_for_position, paginate_with_options, Page};
 use crate::storage::{Bookmark, Progress};
 
 const NOTICE_DURATION: Duration = Duration::from_millis(2800);
@@ -27,7 +27,7 @@ pub(crate) struct ReaderState {
     pub bookmarks: Vec<Bookmark>,
     pub config: ReaderConfig,
     pub hidden: bool,
-    pub discreet_log: Option<DiscreetLogState>,
+    pub agent: AgentSession,
 }
 
 #[derive(Debug, Default)]
@@ -123,14 +123,25 @@ pub(crate) enum ReaderAction {
     StartFilter,
     Input(char),
     DiscreetUnavailable,
+    ScrollLines(isize),
+    OpenCommand,
+    CompleteCommand,
+    ToggleDensity,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) enum ReaderEffect {
     SaveProgress(Progress),
     SaveConfig,
-    AddBookmark { label: String, progress: Progress },
-    DeleteBookmark { id: String },
+    AddBookmark {
+        label: String,
+        progress: Progress,
+    },
+    DeleteBookmark {
+        id: String,
+        removed: Bookmark,
+        index: usize,
+    },
     Exit,
 }
 
@@ -163,9 +174,12 @@ impl ReaderState {
             bookmarks,
             config,
             hidden: false,
-            discreet_log: None,
+            agent: AgentSession::default(),
         };
-        state.refresh_discreet_log();
+        state.reflow_agent();
+        if state.config.discreet_mode {
+            state.agent.record_read(ReadDirection::Current);
+        }
         state
     }
 
@@ -178,6 +192,9 @@ impl ReaderState {
     }
 
     pub fn current_section(&self) -> usize {
+        if self.config.discreet_mode {
+            return self.position.section_index;
+        }
         self.pages
             .get(self.current_page)
             .map(|page| page.section_index)
@@ -186,6 +203,16 @@ impl ReaderState {
     }
 
     pub(crate) fn physical_row_range(&self) -> (usize, usize, usize) {
+        if self.config.discreet_mode {
+            let view = &self.agent.view;
+            return (
+                view.top + 1,
+                (view.top + self.agent_body_height())
+                    .min(view.lines.len())
+                    .max(1),
+                view.lines.len().max(1),
+            );
+        }
         let total = self
             .pages
             .iter()
@@ -239,6 +266,29 @@ impl ReaderState {
         if self.hidden && !matches!(action, ReaderAction::Exit | ReaderAction::ToggleHidden) {
             return Vec::new();
         }
+        if self.config.discreet_mode {
+            if self.agent.command.is_some()
+                && matches!(
+                    action,
+                    ReaderAction::Input(_)
+                        | ReaderAction::Backspace
+                        | ReaderAction::Confirm
+                        | ReaderAction::Cancel
+                        | ReaderAction::CompleteCommand
+                )
+            {
+                return self.update_command(action);
+            }
+            if self.agent.help
+                && matches!(
+                    action,
+                    ReaderAction::Confirm | ReaderAction::Cancel | ReaderAction::OpenHelp
+                )
+            {
+                self.agent.help = false;
+                return Vec::new();
+            }
+        }
         if self.config.discreet_mode && !action_is_available_in_discreet(action) {
             self.notify("Unavailable in discreet mode", NotificationKind::Info);
             return Vec::new();
@@ -246,6 +296,23 @@ impl ReaderState {
 
         match action {
             ReaderAction::None => Vec::new(),
+            ReaderAction::ScrollLines(delta) => self.scroll_agent(delta, false),
+            ReaderAction::OpenCommand => {
+                self.agent.command = Some(String::new());
+                Vec::new()
+            }
+            ReaderAction::CompleteCommand => Vec::new(),
+            ReaderAction::ToggleDensity => {
+                if self.config.discreet_mode {
+                    self.agent.density = self.agent.density.toggle();
+                    self.reflow_agent();
+                    self.agent.receipt = Some(match self.agent.density {
+                        AgentDensity::Comfortable => "Density: comfortable",
+                        AgentDensity::Inspect => "Density: inspect",
+                    });
+                }
+                Vec::new()
+            }
             ReaderAction::Exit => vec![ReaderEffect::Exit],
             ReaderAction::NextScreen => self.move_screen(1),
             ReaderAction::PreviousScreen => self.move_screen(-1),
@@ -315,6 +382,11 @@ impl ReaderState {
                 Vec::new()
             }
             ReaderAction::OpenHelp => {
+                if self.config.discreet_mode {
+                    self.agent.help = true;
+                    self.agent.help_offset = 0;
+                    return Vec::new();
+                }
                 self.overlay = Overlay::Help;
                 Vec::new()
             }
@@ -333,7 +405,14 @@ impl ReaderState {
             ReaderAction::ToggleDiscreet => {
                 self.config.toggle_discreet_mode();
                 self.overlay = Overlay::None;
+                self.agent.command = None;
+                self.agent.help = false;
+                self.notification = None;
                 self.repaginate();
+                if self.config.discreet_mode {
+                    self.agent.resumed = false;
+                    self.agent.record_read(ReadDirection::Current);
+                }
                 self.notify(
                     if self.config.discreet_mode {
                         "Discreet mode on"
@@ -346,6 +425,13 @@ impl ReaderState {
             }
             ReaderAction::ToggleHidden => {
                 self.hidden = !self.hidden;
+                self.overlay = Overlay::None;
+                self.agent.command = None;
+                self.agent.help = false;
+                self.notification = None;
+                if self.hidden {
+                    self.agent.receipt = None;
+                }
                 if !self.hidden {
                     self.repaginate();
                 }
@@ -378,7 +464,12 @@ impl ReaderState {
                 vec![ReaderEffect::SaveConfig]
             }
             ReaderAction::AdjustTextWidth(delta) => {
-                let current = self.config.text_width.unwrap_or(self.viewport.width);
+                let default_width = if self.config.discreet_mode {
+                    72
+                } else {
+                    self.viewport.width
+                };
+                let current = self.config.text_width.unwrap_or(default_width);
                 let max_width = self.viewport.width.max(20);
                 let new_width = if delta < 0 {
                     current.saturating_sub(delta.unsigned_abs()).max(20)
@@ -408,7 +499,8 @@ impl ReaderState {
             ReaderAction::DeleteBookmark => {
                 if let Overlay::Bookmarks(navigator) = &mut self.overlay {
                     if !self.bookmarks.is_empty() && navigator.selection < self.bookmarks.len() {
-                        let removed = self.bookmarks.remove(navigator.selection);
+                        let index = navigator.selection;
+                        let removed = self.bookmarks.remove(index);
                         if navigator.selection >= self.bookmarks.len() && !self.bookmarks.is_empty()
                         {
                             navigator.selection = self.bookmarks.len() - 1;
@@ -417,7 +509,11 @@ impl ReaderState {
                             format!("Deleted bookmark: {}", removed.label),
                             NotificationKind::Info,
                         );
-                        return vec![ReaderEffect::DeleteBookmark { id: removed.id }];
+                        return vec![ReaderEffect::DeleteBookmark {
+                            id: removed.id.clone(),
+                            removed,
+                            index,
+                        }];
                     }
                 }
                 Vec::new()
@@ -462,6 +558,14 @@ impl ReaderState {
     }
 
     fn move_screen(&mut self, delta: isize) -> Vec<ReaderEffect> {
+        if self.config.discreet_mode {
+            let height = self.agent_body_height();
+            let overlap = usize::from(self.config.page_overlap && height >= 4);
+            return self.scroll_agent(
+                delta * height.saturating_sub(overlap).max(1) as isize,
+                delta > 0 && overlap > 0,
+            );
+        }
         if !matches!(self.overlay, Overlay::None) {
             return Vec::new();
         }
@@ -478,8 +582,20 @@ impl ReaderState {
     fn jump_boundary(&mut self, end: bool) -> Vec<ReaderEffect> {
         match &mut self.overlay {
             Overlay::None => {
+                let before = self.position;
                 let tenths = if end { 1000 } else { 0 };
+                self.agent.view.context_rows = 0;
                 self.jump_to_position(self.metrics.position_at_tenths(tenths));
+                if self.position == before {
+                    return Vec::new();
+                }
+                if self.config.discreet_mode {
+                    self.agent.record_read(if end {
+                        ReadDirection::Forward
+                    } else {
+                        ReadDirection::Backward
+                    });
+                }
                 vec![ReaderEffect::SaveProgress(self.current_progress())]
             }
             Overlay::Contents(navigator) => {
@@ -499,42 +615,128 @@ impl ReaderState {
         if let Some(page) = self.pages.get(self.current_page) {
             self.position = page.source_start;
         }
-        self.refresh_discreet_log();
+        self.reflow_agent();
     }
 
     fn jump_to_position(&mut self, position: TextPosition) {
         self.position = self.metrics.clamp(position);
         self.current_page = page_for_position(&self.pages, self.position);
-        self.refresh_discreet_log();
+        self.reflow_agent();
     }
 
     fn repaginate(&mut self) {
         self.pages = paginate_for_config(&self.document, self.viewport, &self.config);
         self.current_page = page_for_position(&self.pages, self.position);
-        self.refresh_discreet_log();
+        self.reflow_agent();
     }
 
-    fn refresh_discreet_log(&mut self) {
-        if !self.config.discreet_mode {
-            self.discreet_log = None;
-            return;
+    fn reflow_agent(&mut self) {
+        if self.config.discreet_mode {
+            let layout = AgentLayout::new(self.viewport, self.config.text_width);
+            if layout.body.width == 0 || layout.body.height == 0 {
+                return;
+            }
+            if layout.body.height < 4 {
+                self.agent.view.context_rows = 0;
+            }
+            self.agent.view.reflow(
+                &self.document.sections,
+                layout.net_text_width(self.agent.density),
+                self.position,
+            );
         }
-        let Some(page_start) = self
-            .pages
-            .get(self.current_page)
-            .map(|page| page.source_start)
-        else {
-            self.discreet_log = None;
-            return;
-        };
-        if self
-            .discreet_log
-            .as_ref()
-            .is_some_and(|log| log.page_start() == page_start)
+    }
+
+    fn agent_body_height(&self) -> usize {
+        usize::from(AgentLayout::new(self.viewport, self.config.text_width).net_text_height())
+    }
+
+    fn scroll_agent(&mut self, delta: isize, overlap: bool) -> Vec<ReaderEffect> {
+        let height = self.agent_body_height();
+        if self.agent.help {
+            let count = crate::reader_input::DISCREET_BINDINGS.len()
+                + crate::reader_input::LOCAL_COMMANDS.len()
+                + 2;
+            self.agent.help_offset = self
+                .agent
+                .help_offset
+                .saturating_add_signed(delta)
+                .min(count.saturating_sub(height));
+            return Vec::new();
+        }
+        if !self.config.discreet_mode
+            || height == 0
+            || self.agent.help
+            || self.agent.command.is_some()
         {
-            return;
+            return Vec::new();
         }
-        self.discreet_log = Some(DiscreetLogState::new(&self.book_id, page_start));
+        let view = &mut self.agent.view;
+        if view.lines.is_empty() {
+            return Vec::new();
+        }
+        let old = view.top;
+        // At a short final window, forward navigation has no new content to reveal.
+        if delta > 0 && old.saturating_add(height) >= view.lines.len() {
+            return Vec::new();
+        }
+        let mut top = old.saturating_add_signed(delta).min(view.lines.len() - 1);
+        let mut context = usize::from(overlap && top + 1 < view.lines.len());
+        if context > 0 && view.lines[top].section != view.lines[top + 1].section {
+            top += 1;
+            context = 0;
+        }
+        if top == old {
+            return Vec::new();
+        }
+        view.top = top;
+        view.context_rows = context;
+        self.position = view.lines[top + context].position();
+        self.agent.record_read(if delta > 0 {
+            ReadDirection::Forward
+        } else {
+            ReadDirection::Backward
+        });
+        vec![ReaderEffect::SaveProgress(self.current_progress())]
+    }
+
+    fn update_command(&mut self, action: ReaderAction) -> Vec<ReaderEffect> {
+        let Some(input) = self.agent.command.as_mut() else {
+            return Vec::new();
+        };
+        match action {
+            ReaderAction::Input(ch) if !ch.is_control() && input.chars().count() < 64 => {
+                input.push(ch)
+            }
+            ReaderAction::Backspace => {
+                input.pop();
+            }
+            ReaderAction::Cancel => {
+                self.agent.command = None;
+            }
+            ReaderAction::CompleteCommand => {
+                let matches: Vec<_> = crate::reader_input::LOCAL_COMMANDS
+                    .iter()
+                    .filter(|(name, _)| name.starts_with(input.as_str()))
+                    .collect();
+                if matches.len() == 1 {
+                    *input = matches[0].0.to_string();
+                }
+            }
+            ReaderAction::Confirm => {
+                let action = crate::reader_input::LOCAL_COMMANDS
+                    .iter()
+                    .find(|(name, _)| *name == input.trim())
+                    .map(|(_, action)| *action);
+                self.agent.command = None;
+                if let Some(action) = action {
+                    return self.update(action);
+                }
+                self.agent.receipt = Some("Unknown local command · :help");
+            }
+            _ => {}
+        }
+        Vec::new()
     }
 
     fn move_overlay_selection(&mut self, delta: isize) {
@@ -828,12 +1030,7 @@ fn paginate_for_config(
     config: &ReaderConfig,
 ) -> Vec<Page> {
     if config.discreet_mode {
-        let layout = discreet_layout(viewport, config.text_width);
-        return paginate_discreet(
-            &document.sections,
-            layout.body_width,
-            discreet_content_height(viewport),
-        );
+        return Vec::new();
     }
     let content_height = if config.immersive_mode {
         viewport.height.max(1)
@@ -850,29 +1047,6 @@ fn paginate_for_config(
     )
 }
 
-pub(crate) fn discreet_chunks(area: Rect) -> [Rect; 3] {
-    let action_height = u16::from(area.height >= 5);
-    let desired_reading_height = (area.height / 3).clamp(1, 8);
-    let reading_height = desired_reading_height.min(area.height.saturating_sub(action_height));
-    let stack_height = area
-        .height
-        .saturating_sub(reading_height)
-        .saturating_sub(action_height);
-    let stack = Rect::new(area.x, area.y, area.width, stack_height);
-    let reading = Rect::new(
-        area.x,
-        area.y.saturating_add(stack_height),
-        area.width,
-        reading_height,
-    );
-    let action = Rect::new(area.x, reading.bottom(), area.width, action_height);
-    [stack, reading, action]
-}
-
-fn discreet_content_height(viewport: Rect) -> u16 {
-    discreet_chunks(viewport)[1].height.max(1)
-}
-
 fn action_is_available_in_discreet(action: ReaderAction) -> bool {
     matches!(
         action,
@@ -886,6 +1060,14 @@ fn action_is_available_in_discreet(action: ReaderAction) -> bool {
             | ReaderAction::ToggleHidden
             | ReaderAction::AddBookmark
             | ReaderAction::DiscreetUnavailable
+            | ReaderAction::ScrollLines(_)
+            | ReaderAction::OpenCommand
+            | ReaderAction::CompleteCommand
+            | ReaderAction::OpenHelp
+            | ReaderAction::AdjustTextWidth(_)
+            | ReaderAction::ResetTextWidth
+            | ReaderAction::TogglePageOverlap
+            | ReaderAction::ToggleDensity
     )
 }
 
@@ -1156,17 +1338,11 @@ mod tests {
         assert!(state.update(ReaderAction::AddBookmark).is_empty());
         assert_eq!(state.position, position);
         assert!(!state.config.discreet_mode);
-        assert!(matches!(
-            state.overlay,
-            Overlay::Search(SearchInput { ref query, .. }) if query == "x"
-        ));
+        assert!(matches!(state.overlay, Overlay::None));
 
         state.update(ReaderAction::ToggleHidden);
         assert!(!state.hidden);
-        assert!(matches!(
-            state.overlay,
-            Overlay::Search(SearchInput { ref query, .. }) if query == "x"
-        ));
+        assert!(matches!(state.overlay, Overlay::None));
     }
 
     #[test]
@@ -1189,115 +1365,140 @@ mod tests {
         );
     }
 
-    #[test]
-    fn discreet_log_state_is_stable_until_the_visible_page_changes() {
-        let mut state = state();
-        state.update(ReaderAction::ToggleDiscreet);
-        let first = state.discreet_log.clone();
-
-        state.update(ReaderAction::AddBookmark);
-        assert_eq!(state.discreet_log, first);
-
-        state.update(ReaderAction::NextScreen);
-        assert_ne!(state.discreet_log, first);
-    }
-
-    #[test]
-    fn discreet_layout_adapts_the_body_from_one_to_eight_rows() {
-        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 80, 24));
-        assert_eq!(stack.height + reading.height + action.height, 24);
-        assert_eq!(reading.height, 8);
-        assert_eq!(action.height, 1);
-
-        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 8));
-        assert_eq!(stack.height + reading.height + action.height, 8);
-        assert_eq!(reading.height, 2);
-        assert_eq!(action.height, 1);
-
-        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 4));
-        assert_eq!(stack.height, 3);
-        assert_eq!(reading.height, 1);
-        assert_eq!(action.height, 0);
-
-        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 1));
-        assert_eq!(stack.height, 0);
-        assert_eq!(reading.height, 1);
-        assert_eq!(action.height, 0);
-
-        let [stack, reading, action] = discreet_chunks(Rect::new(0, 0, 40, 0));
-        assert_eq!(stack.height, 0);
-        assert_eq!(reading.height, 0);
-        assert_eq!(action.height, 0);
-    }
-
-    #[test]
-    fn discreet_text_width_stays_between_twenty_four_and_thirty_two_chinese_characters() {
-        let wide = Rect::new(0, 0, 120, 24);
-        assert_eq!(discreet_layout(wide, None).body_width, 64);
-        assert_eq!(discreet_layout(wide, Some(20)).body_width, 48);
-        assert_eq!(discreet_layout(wide, Some(64)).body_width, 64);
-        assert_eq!(discreet_layout(wide, Some(100)).body_width, 64);
-        assert_eq!(
-            discreet_layout(Rect::new(0, 0, 42, 24), None).body_width,
-            38
-        );
-    }
-
-    #[test]
-    fn discreet_pagination_uses_the_same_recommended_cjk_width() {
-        let text = "中".repeat(100);
-        let sections = vec![Section {
-            title: "Long Chinese text".into(),
-            text,
+    fn agent_state(width: u16, height: u16) -> ReaderState {
+        let mut s = state();
+        s.document.sections = vec![Section {
+            title: "private-section".into(),
+            text: (0..100)
+                .map(|n| format!("　　第{n}行中文正文，保留字符锚点。\n"))
+                .collect(),
         }];
-        let document = BookDocument {
-            id: "cjk".into(),
-            title: "CJK".into(),
-            path: "cjk.txt".into(),
-            format: BookFormat::Txt,
-            metadata: BookMetadata {
-                title: "CJK".into(),
-                author: None,
-                language: Some("zh".into()),
-                publisher: None,
-                format: BookFormat::Txt,
-                path: "cjk.txt".into(),
-                section_count: 1,
-            },
-            sections,
-            contents: vec![ContentsEntry {
-                title: "Long Chinese text".into(),
-                depth: 0,
-                target: TextPosition::new(0, 0),
-            }],
-            contents_source: ContentsSource::Generated,
-        };
-        let mut config = ReaderConfig::default();
-        config.discreet_mode = true;
-        let mut state = ReaderState::new(
-            document,
-            "cjk".into(),
-            Rect::new(0, 0, 120, 24),
-            config,
-            Progress::default(),
-            Vec::new(),
+        s.metrics = s.document.content_metrics();
+        s.resize(width, height);
+        s.update(ReaderAction::ToggleDiscreet);
+        s
+    }
+
+    #[test]
+    fn agent_scroll_and_screen_overlap_use_source_rows() {
+        let mut s = agent_state(80, 24);
+        assert_eq!(s.physical_row_range(), (1, 15, 101));
+        s.update(ReaderAction::ScrollLines(2));
+        assert_eq!(s.agent.view.top, 2);
+        assert_eq!(s.position, s.agent.view.lines[2].position());
+        s.update(ReaderAction::NextScreen);
+        assert_eq!(s.agent.view.top, 16);
+        assert_eq!(s.agent.view.context_rows, 1);
+        assert_eq!(s.position, s.agent.view.lines[17].position());
+        s.update(ReaderAction::PreviousScreen);
+        assert_eq!(s.agent.view.top, 2);
+        assert_eq!(s.agent.view.context_rows, 0);
+        s.update(ReaderAction::ScrollLines(-2));
+        assert_eq!(s.agent.view.top, 0);
+        let reads = s.agent.reads;
+        assert!(s.update(ReaderAction::ScrollLines(-2)).is_empty());
+        assert_eq!(s.agent.reads, reads);
+    }
+
+    #[test]
+    fn agent_reflow_modes_and_folding_keep_exact_character_not_new_line_start() {
+        let mut s = agent_state(80, 24);
+        let anchor = TextPosition::new(0, 147);
+        s.jump_to_position(anchor);
+        let reads = s.agent.reads;
+        for (w, h) in [(60, 18), (120, 30), (80, 24)] {
+            s.resize(w, h);
+            assert_eq!(s.position, anchor);
+        }
+        assert_eq!(s.agent.reads, reads);
+        s.update(ReaderAction::ToggleHidden);
+        s.resize(60, 18);
+        s.update(ReaderAction::ToggleHidden);
+        assert_eq!(s.position, anchor);
+        assert_eq!(s.agent.reads, reads);
+        s.update(ReaderAction::ToggleDiscreet);
+        s.update(ReaderAction::ToggleDiscreet);
+        assert_eq!(s.position, anchor);
+        let top = &s.agent.view.lines[s.agent.view.top];
+        assert!(
+            top.line.start_char <= anchor.char_offset && top.line.end_char >= anchor.char_offset
         );
+    }
 
-        assert_eq!(state.pages[0].lines[0].chars().count(), 32);
-        assert!(state.pages[0]
-            .lines
-            .iter()
-            .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 64));
+    #[test]
+    fn agent_checkpoint_waits_for_io_and_preserves_window() {
+        let mut s = agent_state(60, 18);
+        s.update(ReaderAction::ScrollLines(2));
+        let top = s.agent.view.top;
+        let reads = s.agent.reads;
+        let effects = s.update(ReaderAction::AddBookmark);
+        assert!(
+            matches!(&effects[0],ReaderEffect::AddBookmark { progress,.. } if progress.position == s.position)
+        );
+        assert_eq!(s.agent.checkpoints, 0);
+        assert_eq!(s.agent.receipt, None);
+        assert_eq!((s.agent.view.top, s.agent.reads), (top, reads));
+    }
 
-        let position = state.position;
-        let wide_total = state.physical_row_range().2;
-        state.resize(52, 24);
-        assert_eq!(state.position, position);
-        assert_ne!(state.physical_row_range().2, wide_total);
-        assert!(state.pages[0]
-            .lines
-            .iter()
-            .all(|line| unicode_width::UnicodeWidthStr::width(line.as_str()) <= 48));
+    #[test]
+    fn agent_commands_execute_only_registry_entries_and_f12_discards_drafts() {
+        let mut s = agent_state(80, 24);
+        s.update(ReaderAction::OpenCommand);
+        for ch in "down".chars() {
+            s.update(ReaderAction::Input(ch));
+        }
+        s.update(ReaderAction::Confirm);
+        assert_eq!(s.agent.view.top, 2);
+        s.update(ReaderAction::OpenCommand);
+        for ch in "private arbitrary input".chars() {
+            s.update(ReaderAction::Input(ch));
+        }
+        s.update(ReaderAction::Confirm);
+        assert_eq!(s.agent.receipt, Some("Unknown local command · :help"));
+        s.update(ReaderAction::OpenCommand);
+        for _ in 0..100 {
+            s.update(ReaderAction::Input('x'));
+        }
+        assert_eq!(s.agent.command.as_ref().unwrap().len(), 64);
+        s.update(ReaderAction::ToggleHidden);
+        assert!(s.agent.command.is_none());
+        s.update(ReaderAction::ToggleHidden);
+        assert!(s.agent.command.is_none());
+        s.update(ReaderAction::OpenCommand);
+        for ch in "check".chars() {
+            s.update(ReaderAction::Input(ch));
+        }
+        s.update(ReaderAction::CompleteCommand);
+        assert_eq!(s.agent.command.as_deref(), Some("checkpoint"));
+    }
+
+    #[test]
+    fn agent_overlap_does_not_cross_section_boundary_or_repeat_at_end() {
+        let mut s = state();
+        s.document.sections = vec![
+            Section {
+                title: "one".into(),
+                text: (0..15)
+                    .map(|n| format!("{n}"))
+                    .collect::<Vec<_>>()
+                    .join("\n"),
+            },
+            Section {
+                title: "two".into(),
+                text: "next\nlast".into(),
+            },
+        ];
+        s.metrics = s.document.content_metrics();
+        s.resize(80, 24);
+        s.update(ReaderAction::ToggleDiscreet);
+        s.update(ReaderAction::NextScreen);
+        assert_eq!(s.position, TextPosition::new(1, 0));
+        assert_eq!(s.agent.view.context_rows, 0);
+        let reads = s.agent.reads;
+        s.update(ReaderAction::NextScreen);
+        assert_eq!(s.agent.reads, reads);
+        s.update(ReaderAction::ScrollLines(-2));
+        assert_eq!(s.agent.view.top, 13);
     }
 
     #[test]
@@ -1480,7 +1681,15 @@ mod tests {
         let delete_effects = state.update(ReaderAction::DeleteBookmark);
         assert_eq!(
             delete_effects,
-            vec![ReaderEffect::DeleteBookmark { id: "bm2".into() }]
+            vec![ReaderEffect::DeleteBookmark {
+                id: "bm2".into(),
+                removed: Bookmark {
+                    id: "bm2".into(),
+                    label: "Bookmark 2".into(),
+                    position: TextPosition::new(1, 10),
+                },
+                index: 1,
+            }]
         );
         assert_eq!(state.bookmarks.len(), 1);
         assert!(matches!(

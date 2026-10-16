@@ -28,6 +28,10 @@ pub(crate) enum ReadingCommand {
     ResetWidth,
     ToggleImmersive,
     TogglePageOverlap,
+    ScrollUp,
+    ScrollDown,
+    Commands,
+    ToggleDensity,
 }
 
 const PREVIOUS_KEYS: &[KeyChord] = &[
@@ -225,7 +229,7 @@ pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         chords: HIDE_KEYS,
         keys: "F12",
         hud_keys: "F12",
-        label: "Hide behind diagnostics",
+        label: "Fold / restore output",
         short_label: "Hide",
         show_in_hud: false,
         hud_priority: 2,
@@ -304,9 +308,35 @@ pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
 
 pub(crate) const DISCREET_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
     KeyBinding {
+        command: ReadingCommand::ScrollUp,
+        chords: &[
+            KeyChord::plain(KeyCode::Char('k')),
+            KeyChord::plain(KeyCode::Up),
+        ],
+        keys: "k / Up",
+        hud_keys: "k",
+        label: "Scroll up two lines",
+        short_label: "Next",
+        show_in_hud: true,
+        hud_priority: 0,
+    },
+    KeyBinding {
+        command: ReadingCommand::ScrollDown,
+        chords: &[
+            KeyChord::plain(KeyCode::Char('j')),
+            KeyChord::plain(KeyCode::Down),
+        ],
+        keys: "j / Down",
+        hud_keys: "j",
+        label: "Scroll down two lines",
+        short_label: "Next",
+        show_in_hud: true,
+        hud_priority: 0,
+    },
+    KeyBinding {
         command: ReadingCommand::PreviousScreen,
-        chords: PREVIOUS_KEYS,
-        keys: "k / Up / PgUp",
+        chords: &[KeyChord::plain(KeyCode::PageUp)],
+        keys: "PgUp",
         hud_keys: "k",
         label: "Previous screen",
         short_label: "Prev",
@@ -315,8 +345,11 @@ pub(crate) const DISCREET_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
     },
     KeyBinding {
         command: ReadingCommand::NextScreen,
-        chords: NEXT_KEYS,
-        keys: "j / Down / Space / PgDn",
+        chords: &[
+            KeyChord::plain(KeyCode::Char(' ')),
+            KeyChord::plain(KeyCode::PageDown),
+        ],
+        keys: "Space / PgDn",
         hud_keys: "j",
         label: "Next screen",
         short_label: "Next",
@@ -324,11 +357,111 @@ pub(crate) const DISCREET_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         hud_priority: 0,
     },
     KeyBinding {
+        command: ReadingCommand::Bookmark,
+        chords: BOOKMARK_KEYS,
+        keys: "b",
+        hud_keys: "b",
+        label: "Save checkpoint",
+        short_label: "Bookmark",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::Discreet,
+        chords: DISCREET_KEYS,
+        keys: "p",
+        hud_keys: "p",
+        label: "Toggle discreet mode",
+        short_label: "Discreet",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::Hide,
+        chords: HIDE_KEYS,
+        keys: "F12",
+        hud_keys: "F12",
+        label: "Fold / restore output",
+        short_label: "Hide",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::Commands,
+        chords: &[KeyChord::plain(KeyCode::Char(':'))],
+        keys: ":",
+        hud_keys: "j",
+        label: "Local commands",
+        short_label: "Next",
+        show_in_hud: true,
+        hud_priority: 0,
+    },
+    KeyBinding {
+        command: ReadingCommand::ToggleDensity,
+        chords: &[KeyChord::plain(KeyCode::Char('v'))],
+        keys: "v",
+        hud_keys: "v",
+        label: "Toggle density (comfortable / inspect)",
+        short_label: "Density",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::Help,
+        chords: HELP_KEYS,
+        keys: "? / F1",
+        hud_keys: "?",
+        label: "Full help",
+        short_label: "Help",
+        show_in_hud: true,
+        hud_priority: 0,
+    },
+    KeyBinding {
+        command: ReadingCommand::DecreaseWidth,
+        chords: DECREASE_WIDTH_KEYS,
+        keys: "[",
+        hud_keys: "[",
+        label: "Narrow reading width",
+        short_label: "Narrow",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::IncreaseWidth,
+        chords: INCREASE_WIDTH_KEYS,
+        keys: "]",
+        hud_keys: "]",
+        label: "Widen reading width",
+        short_label: "Widen",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::ResetWidth,
+        chords: RESET_WIDTH_KEYS,
+        keys: "\\",
+        hud_keys: "\\",
+        label: "Reset reading width to auto",
+        short_label: "Auto width",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
+        command: ReadingCommand::TogglePageOverlap,
+        chords: OVERLAP_KEYS,
+        keys: "o",
+        hud_keys: "o",
+        label: "Toggle page overlap context",
+        short_label: "Overlap",
+        show_in_hud: false,
+        hud_priority: 2,
+    },
+    KeyBinding {
         command: ReadingCommand::Start,
         chords: START_KEYS,
         keys: "Home",
         hud_keys: "Home",
-        label: "Go to start",
+        label: "Go to start (0%)",
         short_label: "Start",
         show_in_hud: false,
         hud_priority: 2,
@@ -338,40 +471,10 @@ pub(crate) const DISCREET_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         chords: END_KEYS,
         keys: "End / G",
         hud_keys: "End",
-        label: "Go to end",
+        label: "Go to end (100%)",
         short_label: "End",
         show_in_hud: false,
         hud_priority: 2,
-    },
-    KeyBinding {
-        command: ReadingCommand::Bookmark,
-        chords: BOOKMARK_KEYS,
-        keys: "b",
-        hud_keys: "b",
-        label: "Add bookmark",
-        short_label: "Bookmark",
-        show_in_hud: true,
-        hud_priority: 1,
-    },
-    KeyBinding {
-        command: ReadingCommand::Discreet,
-        chords: DISCREET_KEYS,
-        keys: "p",
-        hud_keys: "p",
-        label: "Return to normal",
-        short_label: "Normal",
-        show_in_hud: true,
-        hud_priority: 0,
-    },
-    KeyBinding {
-        command: ReadingCommand::Hide,
-        chords: HIDE_KEYS,
-        keys: "F12",
-        hud_keys: "F12",
-        label: "Hide",
-        short_label: "Hide",
-        show_in_hud: true,
-        hud_priority: 0,
     },
     KeyBinding {
         command: ReadingCommand::Quit,
@@ -380,9 +483,22 @@ pub(crate) const DISCREET_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         hud_keys: "q",
         label: "Save and quit",
         short_label: "Quit",
-        show_in_hud: false,
-        hud_priority: 2,
+        show_in_hud: true,
+        hud_priority: 0,
     },
+];
+
+pub(crate) const LOCAL_COMMANDS: &[(&str, ReaderAction)] = &[
+    ("next", ReaderAction::NextScreen),
+    ("prev", ReaderAction::PreviousScreen),
+    ("down", ReaderAction::ScrollLines(2)),
+    ("up", ReaderAction::ScrollLines(-2)),
+    ("checkpoint", ReaderAction::AddBookmark),
+    ("density", ReaderAction::ToggleDensity),
+    ("fold", ReaderAction::ToggleHidden),
+    ("normal", ReaderAction::ToggleDiscreet),
+    ("help", ReaderAction::OpenHelp),
+    ("quit", ReaderAction::Exit),
 ];
 
 pub(crate) fn action_for_key(key: KeyEvent, state: &ReaderState) -> ReaderAction {
@@ -396,6 +512,25 @@ pub(crate) fn action_for_key(key: KeyEvent, state: &ReaderState) -> ReaderAction
         return ReaderAction::None;
     }
     if state.config.discreet_mode {
+        if state.agent.command.is_some() {
+            return if key.code == KeyCode::Tab {
+                ReaderAction::CompleteCommand
+            } else {
+                text_input_action(key)
+            };
+        }
+        if state.agent.help {
+            return match key.code {
+                KeyCode::Esc | KeyCode::Enter | KeyCode::Char('?') | KeyCode::F(1) => {
+                    ReaderAction::Cancel
+                }
+                KeyCode::Char('j') | KeyCode::Down | KeyCode::PageDown => {
+                    ReaderAction::ScrollLines(2)
+                }
+                KeyCode::Char('k') | KeyCode::Up | KeyCode::PageUp => ReaderAction::ScrollLines(-2),
+                _ => ReaderAction::None,
+            };
+        }
         return command_for(DISCREET_BINDINGS, key)
             .map(command_action)
             .or_else(|| {
@@ -448,6 +583,9 @@ pub(crate) fn action_for_key(key: KeyEvent, state: &ReaderState) -> ReaderAction
 
 fn command_action(command: ReadingCommand) -> ReaderAction {
     match command {
+        ReadingCommand::ScrollUp => ReaderAction::ScrollLines(-2),
+        ReadingCommand::ScrollDown => ReaderAction::ScrollLines(2),
+        ReadingCommand::Commands => ReaderAction::OpenCommand,
         ReadingCommand::PreviousScreen => ReaderAction::PreviousScreen,
         ReadingCommand::NextScreen => ReaderAction::NextScreen,
         ReadingCommand::GoToPercent => ReaderAction::OpenPercent,
@@ -471,6 +609,7 @@ fn command_action(command: ReadingCommand) -> ReaderAction {
         ReadingCommand::ResetWidth => ReaderAction::ResetTextWidth,
         ReadingCommand::ToggleImmersive => ReaderAction::ToggleImmersive,
         ReadingCommand::TogglePageOverlap => ReaderAction::TogglePageOverlap,
+        ReadingCommand::ToggleDensity => ReaderAction::ToggleDensity,
     }
 }
 
@@ -643,8 +782,8 @@ mod tests {
         state.config.discreet_mode = true;
 
         for (code, expected) in [
-            (KeyCode::Char('j'), ReaderAction::NextScreen),
-            (KeyCode::Char('k'), ReaderAction::PreviousScreen),
+            (KeyCode::Char('j'), ReaderAction::ScrollLines(2)),
+            (KeyCode::Char('k'), ReaderAction::ScrollLines(-2)),
             (KeyCode::Char('b'), ReaderAction::AddBookmark),
             (KeyCode::Char('p'), ReaderAction::ToggleDiscreet),
             (KeyCode::Char('q'), ReaderAction::Exit),
@@ -662,16 +801,11 @@ mod tests {
             KeyCode::Char('t'),
             KeyCode::Char('/'),
             KeyCode::Char('M'),
-            KeyCode::Char('?'),
             KeyCode::Char('n'),
             KeyCode::Char('N'),
             KeyCode::Char('s'),
-            KeyCode::Char('['),
-            KeyCode::Char(']'),
-            KeyCode::Char('\\'),
             KeyCode::Char('i'),
             KeyCode::Char('B'),
-            KeyCode::F(1),
         ] {
             assert_eq!(
                 action_for_key(KeyEvent::new(code, KeyModifiers::NONE), &state),
@@ -718,6 +852,26 @@ mod tests {
                 &state
             ),
             ReaderAction::OpenBookmarks
+        );
+    }
+    #[test]
+    fn command_input_consumes_navigation_but_not_f12() {
+        let mut s = state();
+        s.config.discreet_mode = true;
+        s.agent.command = Some(String::new());
+        for ch in ['j', 'k', 'b', 'p', ' '] {
+            assert_eq!(
+                action_for_key(KeyEvent::new(KeyCode::Char(ch), KeyModifiers::NONE), &s),
+                ReaderAction::Input(ch)
+            );
+        }
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::Tab, KeyModifiers::NONE), &s),
+            ReaderAction::CompleteCommand
+        );
+        assert_eq!(
+            action_for_key(KeyEvent::new(KeyCode::F(12), KeyModifiers::NONE), &s),
+            ReaderAction::ToggleHidden
         );
     }
 }

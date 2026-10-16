@@ -1,0 +1,47 @@
+[
+  {
+    "size": "80x24",
+    "backend": "Windows ConPTY",
+    "scroll": "pass",
+    "checkpoint": "pass",
+    "fold_and_resize": "pass",
+    "exact_position": {
+      "section_index": 0,
+      "char_offset": 66
+    },
+    "normal_mode_switch": "pass",
+    "commands": "pass",
+    "search_draft_redaction": "pass",
+    "idle_frame": "pass"
+  },
+  {
+    "size": "120x30",
+    "backend": "Windows ConPTY",
+    "scroll": "pass",
+    "checkpoint": "pass",
+    "fold_and_resize": "pass",
+    "exact_position": {
+      "section_index": 0,
+      "char_offset": 66
+    },
+    "normal_mode_switch": "pass",
+    "commands": "pass",
+    "search_draft_redaction": "pass",
+    "idle_frame": "pass"
+  },
+  {
+    "size": "60x18",
+    "backend": "Windows ConPTY",
+    "scroll": "pass",
+    "checkpoint": "pass",
+    "fold_and_resize": "pass",
+    "exact_position": {
+      "section_index": 0,
+      "char_offset": 53
+    },
+    "normal_mode_switch": "pass",
+    "commands": "pass",
+    "search_draft_redaction": "pass",
+    "idle_frame": "pass"
+  }
+]
