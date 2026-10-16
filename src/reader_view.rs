@@ -4,7 +4,7 @@ use ratatui::widgets::{Block, Borders, Clear, Padding, Paragraph, Wrap};
 use unicode_width::UnicodeWidthStr;
 
 use crate::book::ContentsSource;
-use crate::discreet::{AgentDensity, AgentLayout};
+use crate::discreet::{AgentDensity, AgentLayout, AgentViewMode};
 use crate::reader_input::{DISCREET_BINDINGS, LOCAL_COMMANDS, READING_BINDINGS};
 use crate::reader_state::{
     format_tenths, ContentsNavigator, NotificationKind, Overlay, ReaderState,
@@ -806,6 +806,22 @@ fn agent_symbol(symbol: &'static str, fallback: &'static str) -> &'static str {
     }
 }
 
+fn split_row_line(
+    left_spans: Vec<Span<'static>>,
+    right_spans: Vec<Span<'static>>,
+    width: u16,
+) -> Line<'static> {
+    let left_len: usize = left_spans.iter().map(|s| s.content.width()).sum();
+    let right_len: usize = right_spans.iter().map(|s| s.content.width()).sum();
+    let pad = usize::from(width).saturating_sub(left_len + right_len);
+    let mut spans = left_spans;
+    if pad > 0 {
+        spans.push(Span::raw(" ".repeat(pad)));
+    }
+    spans.extend(right_spans);
+    Line::from(spans)
+}
+
 fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: Palette) {
     let layout = AgentLayout::new(frame.area(), state.config.text_width);
     if frame.area().height < 6 || layout.body.width == 0 {
@@ -815,11 +831,48 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
         );
         return;
     }
-    let (start, end, _total) = state.physical_row_range();
+    let (start, end, total) = state.physical_row_range();
     let net_height = layout.net_text_height();
+    let width = frame.area().width;
 
-    // 1. Session Context & Tool Activity (header)
-    let inspect_line = Line::styled("> inspect context", palette.muted());
+    // 1. Top Session Context Banner (Full mode only)
+    if layout.mode == AgentViewMode::Full && layout.banner.height >= 3 {
+        let banner_lines = vec![
+            split_row_line(
+                vec![
+                    Span::styled("workspace: ", palette.muted()),
+                    Span::styled("Reader-cli", palette.body()),
+                ],
+                vec![
+                    Span::styled("session: ", palette.muted()),
+                    Span::styled("local", palette.body()),
+                ],
+                width,
+            ),
+            split_row_line(
+                vec![
+                    Span::styled("mode: ", palette.muted()),
+                    Span::styled("Agent Terminal Reading", palette.body()),
+                ],
+                vec![
+                    Span::styled("file: ", palette.muted()),
+                    Span::styled("context.txt", palette.body()),
+                ],
+                width,
+            ),
+            Line::styled(
+                agent_symbol("─", "-").repeat(usize::from(width)),
+                palette.muted(),
+            ),
+        ];
+        frame.render_widget(Paragraph::new(banner_lines), layout.banner);
+    }
+
+    // 2. Session Context & Tool Activity (header)
+    let inspect_line = Line::from(vec![
+        Span::styled(format!("{} ", agent_symbol("❯", ">")), palette.accent()),
+        Span::styled("inspect context", palette.body()),
+    ]);
     let tool_call_line = Line::from(vec![
         Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
         Span::styled("Read(local chunk)", palette.body()),
@@ -832,21 +885,48 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
         palette.muted(),
     )]);
 
-    let header_lines = match layout.header.height {
-        1 => vec![Line::from(vec![
-            Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
-            Span::styled(
-                format!("Read(local chunk) · range {start}–{end}"),
-                palette.body(),
-            ),
-        ])],
-        2 => vec![tool_call_line, tool_res_line],
-        3 => vec![inspect_line, tool_call_line, tool_res_line],
-        _ => vec![inspect_line, tool_call_line, tool_res_line, Line::from("")],
+    let header_lines = if layout.mode == AgentViewMode::Full {
+        if layout.header.height >= 6 {
+            vec![
+                inspect_line,
+                Line::from(vec![
+                    Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+                    Span::styled("Context initialized", palette.body()),
+                ]),
+                Line::styled("  source: local text corpus", palette.muted()),
+                Line::styled("  chunking: paragraph-aware", palette.muted()),
+                tool_call_line,
+                tool_res_line,
+            ]
+        } else {
+            vec![
+                inspect_line,
+                Line::from(vec![
+                    Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+                    Span::styled(
+                        "Context initialized · source: local text corpus",
+                        palette.muted(),
+                    ),
+                ]),
+                tool_call_line,
+                tool_res_line,
+            ]
+        }
+    } else {
+        match layout.header.height {
+            1 => vec![Line::from(vec![
+                Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+                Span::styled(
+                    format!("Read(local chunk) · range {start}–{end}"),
+                    palette.body(),
+                ),
+            ])],
+            _ => vec![tool_call_line, tool_res_line],
+        }
     };
     frame.render_widget(Paragraph::new(header_lines), layout.header);
 
-    // 2. Assistant Response (body)
+    // 3. Assistant Response (body)
     let mut body_lines = Vec::new();
     if state.agent.help {
         let mut help_entries = vec![
@@ -876,7 +956,6 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
             ]));
         }
     } else {
-        // Assistant banner line
         body_lines.push(Line::from(vec![
             Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
             Span::styled("Assistant", palette.body()),
@@ -907,54 +986,76 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
 
         if layout.body.height > net_height + 1 {
             body_lines.push(Line::from(vec![Span::styled(
-                format!("  {} Output complete", agent_symbol("⎿", "\\")),
+                "  [Output complete]",
                 palette.muted(),
             )]));
         }
     }
     frame.render_widget(Paragraph::new(body_lines), layout.body);
 
-    // 3. Input & Actions (footer)
+    // 4. Activity & Actions (footer)
+    let current_chunk = (start / net_height as usize).saturating_add(1);
+    let total_chunks = (total / net_height as usize).max(1);
+    let chunk_label = format!("chunk {current_chunk}/{total_chunks}");
+
     let status_hint = match state.agent.receipt {
         Some(receipt) => format!("✓ {receipt}"),
         None if state.agent.command.is_some() => {
             "Enter execute · Esc cancel · Tab complete".to_string()
         }
         None if state.agent.help => "j/k scroll · Esc close".to_string(),
-        None => "Space next · j/k scroll · : cmd · F12 fold".to_string(),
+        None => "j/k scroll · : cmd · / find · F12 fold".to_string(),
     };
 
-    let prompt_line = match &state.agent.command {
-        Some(text) => Line::from(vec![
+    let prompt_spans = match &state.agent.command {
+        Some(text) => vec![
             Span::styled(format!("{} :", agent_symbol("❯", ">")), palette.accent()),
             Span::styled(text.clone(), palette.body()),
             Span::styled("█", palette.accent()),
-        ]),
-        None => Line::from(vec![
-            Span::styled(format!("{} ", agent_symbol(">", ">")), palette.muted()),
+        ],
+        None => vec![
+            Span::styled(format!("{} ", agent_symbol("❯", ">")), palette.muted()),
             Span::styled("continue_", palette.muted()),
-        ]),
+        ],
     };
 
-    let footer_lines = match layout.footer.height {
-        0 => Vec::new(),
-        1 => vec![prompt_line],
-        2 => vec![
-            prompt_line,
-            Line::styled(format!("  {status_hint}"), palette.muted()),
-        ],
-        _ => vec![
-            Line::from(""),
-            prompt_line,
-            Line::styled(format!("  {status_hint}"), palette.muted()),
-        ],
+    let footer_lines = if layout.mode == AgentViewMode::Full && layout.footer.height >= 3 {
+        vec![
+            Line::styled(
+                agent_symbol("─", "-").repeat(usize::from(width)),
+                palette.muted(),
+            ),
+            split_row_line(
+                vec![
+                    Span::styled("activity: ", palette.muted()),
+                    Span::styled("init ✓   read ✓   render ✓", palette.accent()),
+                ],
+                vec![Span::styled(chunk_label, palette.muted())],
+                width,
+            ),
+            split_row_line(
+                prompt_spans,
+                vec![Span::styled(status_hint, palette.muted())],
+                width,
+            ),
+        ]
+    } else {
+        match layout.footer.height {
+            0 => Vec::new(),
+            1 => vec![Line::from(prompt_spans)],
+            _ => vec![
+                Line::from(prompt_spans),
+                Line::styled(format!("  {status_hint}"), palette.muted()),
+            ],
+        }
     };
     frame.render_widget(Paragraph::new(footer_lines), layout.footer);
 
     if let Some(text) = state.agent.command.as_ref() {
-        let prompt_row_offset = match layout.footer.height {
-            0..=2 => 0,
-            _ => 1,
+        let prompt_row_offset = if layout.mode == AgentViewMode::Full && layout.footer.height >= 3 {
+            2
+        } else {
+            0
         };
         let row = layout.footer.y + prompt_row_offset;
         let col = (3 + text.width() as u16).min(layout.footer.width.saturating_sub(1));
@@ -965,7 +1066,44 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
 // Deliberately accepts no ReaderState, document, notification or input buffer.
 fn draw_hidden(frame: &mut ratatui::Frame<'_>, palette: Palette) {
     let layout = AgentLayout::new(frame.area(), None);
-    let inspect_line = Line::styled("> inspect context", palette.muted());
+    let width = frame.area().width;
+
+    if layout.mode == AgentViewMode::Full && layout.banner.height >= 3 {
+        let banner_lines = vec![
+            split_row_line(
+                vec![
+                    Span::styled("workspace: ", palette.muted()),
+                    Span::styled("Reader-cli", palette.body()),
+                ],
+                vec![
+                    Span::styled("session: ", palette.muted()),
+                    Span::styled("local", palette.body()),
+                ],
+                width,
+            ),
+            split_row_line(
+                vec![
+                    Span::styled("mode: ", palette.muted()),
+                    Span::styled("Agent Terminal Reading", palette.body()),
+                ],
+                vec![
+                    Span::styled("file: ", palette.muted()),
+                    Span::styled("context.txt", palette.body()),
+                ],
+                width,
+            ),
+            Line::styled(
+                agent_symbol("─", "-").repeat(usize::from(width)),
+                palette.muted(),
+            ),
+        ];
+        frame.render_widget(Paragraph::new(banner_lines), layout.banner);
+    }
+
+    let inspect_line = Line::from(vec![
+        Span::styled(format!("{} ", agent_symbol("❯", ">")), palette.accent()),
+        Span::styled("inspect context", palette.body()),
+    ]);
     let tool_call_line = Line::from(vec![
         Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
         Span::styled("Read(local chunk)", palette.body()),
@@ -978,25 +1116,50 @@ fn draw_hidden(frame: &mut ratatui::Frame<'_>, palette: Palette) {
         palette.muted(),
     )]);
 
-    let header_lines = match layout.header.height {
-        1 => vec![tool_call_line],
-        2 => vec![tool_call_line, tool_res_line],
-        3 => vec![inspect_line, tool_call_line, tool_res_line],
-        _ => vec![inspect_line, tool_call_line, tool_res_line, Line::from("")],
+    let header_lines = if layout.mode == AgentViewMode::Full {
+        vec![inspect_line, tool_call_line, tool_res_line]
+    } else {
+        match layout.header.height {
+            1 => vec![tool_call_line],
+            _ => vec![tool_call_line, tool_res_line],
+        }
     };
     frame.render_widget(Paragraph::new(header_lines), layout.header);
 
-    let prompt_line = Line::from(vec![
-        Span::styled(format!("{} ", agent_symbol(">", ">")), palette.muted()),
+    let prompt_spans = vec![
+        Span::styled(format!("{} ", agent_symbol("❯", ">")), palette.muted()),
         Span::styled("continue_", palette.muted()),
-    ]);
-    let hint_line = Line::styled("  F12 resume", palette.muted());
+    ];
 
-    let footer_lines = match layout.footer.height {
-        0 => Vec::new(),
-        1 => vec![prompt_line],
-        2 => vec![prompt_line, hint_line],
-        _ => vec![Line::from(""), prompt_line, hint_line],
+    let footer_lines = if layout.mode == AgentViewMode::Full && layout.footer.height >= 3 {
+        vec![
+            Line::styled(
+                agent_symbol("─", "-").repeat(usize::from(width)),
+                palette.muted(),
+            ),
+            split_row_line(
+                vec![
+                    Span::styled("activity: ", palette.muted()),
+                    Span::styled("session paused", palette.muted()),
+                ],
+                vec![Span::styled("chunk folded", palette.muted())],
+                width,
+            ),
+            split_row_line(
+                prompt_spans,
+                vec![Span::styled("F12 resume", palette.muted())],
+                width,
+            ),
+        ]
+    } else {
+        match layout.footer.height {
+            0 => Vec::new(),
+            1 => vec![Line::from(prompt_spans)],
+            _ => vec![
+                Line::from(prompt_spans),
+                Line::styled("  F12 resume", palette.muted()),
+            ],
+        }
     };
     frame.render_widget(Paragraph::new(footer_lines), layout.footer);
 }
@@ -1241,7 +1404,9 @@ mod tests {
 
     #[test]
     fn agent_terminal_four_semantic_regions_and_comfortable_rows() {
-        for (w, h, expected_net_rows) in [(80, 24, 15), (60, 18, 12), (120, 30, 16)] {
+        for (w, h, expected_net_rows, is_full) in
+            [(80, 24, 12, true), (60, 18, 12, false), (120, 30, 16, true)]
+        {
             let mut s = state();
             s.resize(w, h);
             s.update(crate::reader_state::ReaderAction::ToggleDiscreet);
@@ -1253,6 +1418,17 @@ mod tests {
             terminal.draw(|f| draw(f, &s)).unwrap();
             let screen = format!("{}", terminal.backend());
 
+            if is_full {
+                // Top Banner & Scheme A context
+                assert!(screen.contains("workspace: Reader-cli"));
+                assert!(screen.contains("session: local"));
+                assert!(screen.contains("mode: Agent Terminal Reading"));
+                assert!(screen.contains("file: context.txt"));
+                assert!(screen.contains("Context initialized"));
+                assert!(screen.contains("activity: init ✓   read ✓   render ✓"));
+                assert!(screen.contains("chunk "));
+            }
+
             // Region 1 & 2: Session Context and Tool Activity
             assert!(screen.contains("Read(local chunk)"));
             assert!(screen.contains("Loaded source range"));
@@ -1260,7 +1436,7 @@ mod tests {
             // Region 3: Assistant Response with verbatim prose
             assert!(screen.contains("Assistant"));
             assert!(screen.contains("bright readable text"));
-            assert!(screen.contains("Output complete"));
+            assert!(screen.contains("[Output complete]"));
 
             // Region 4: Input / Action
             assert!(screen.contains("continue_"));

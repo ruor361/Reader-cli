@@ -1382,14 +1382,14 @@ mod tests {
     #[test]
     fn agent_scroll_and_screen_overlap_use_source_rows() {
         let mut s = agent_state(80, 24);
-        assert_eq!(s.physical_row_range(), (1, 15, 101));
+        assert_eq!(s.physical_row_range(), (1, 12, 101));
         s.update(ReaderAction::ScrollLines(2));
         assert_eq!(s.agent.view.top, 2);
         assert_eq!(s.position, s.agent.view.lines[2].position());
         s.update(ReaderAction::NextScreen);
-        assert_eq!(s.agent.view.top, 16);
+        assert_eq!(s.agent.view.top, 13);
         assert_eq!(s.agent.view.context_rows, 1);
-        assert_eq!(s.position, s.agent.view.lines[17].position());
+        assert_eq!(s.position, s.agent.view.lines[14].position());
         s.update(ReaderAction::PreviousScreen);
         assert_eq!(s.agent.view.top, 2);
         assert_eq!(s.agent.view.context_rows, 0);
@@ -1478,7 +1478,7 @@ mod tests {
         s.document.sections = vec![
             Section {
                 title: "one".into(),
-                text: (0..15)
+                text: (0..12)
                     .map(|n| format!("{n}"))
                     .collect::<Vec<_>>()
                     .join("\n"),
@@ -1498,7 +1498,7 @@ mod tests {
         s.update(ReaderAction::NextScreen);
         assert_eq!(s.agent.reads, reads);
         s.update(ReaderAction::ScrollLines(-2));
-        assert_eq!(s.agent.view.top, 13);
+        assert_eq!(s.agent.view.top, 10);
     }
 
     #[test]

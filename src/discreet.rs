@@ -78,8 +78,16 @@ impl AgentDensity {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(crate) enum AgentViewMode {
+    Full,
+    Compact,
+}
+
 #[derive(Debug, Clone, Copy)]
 pub(crate) struct AgentLayout {
+    pub mode: AgentViewMode,
+    pub banner: Rect,
     pub header: Rect,
     pub body: Rect,
     pub footer: Rect,
@@ -89,19 +97,31 @@ impl AgentLayout {
     pub fn new(area: Rect, configured_width: Option<u16>) -> Self {
         if area.height < 6 {
             return Self {
+                mode: AgentViewMode::Compact,
+                banner: Rect::default(),
                 header: Rect::new(area.x, area.y, area.width, area.height.min(1)),
                 body: Rect::default(),
                 footer: Rect::default(),
             };
         }
-        let (head, foot) = match area.height {
-            0..=5 => (area.height.min(1), 0),
-            6..=13 => (1, 1),
-            14..=21 => (2, 2),
-            _ => (4, 3),
+        let is_full = area.width >= 72 && area.height >= 22;
+        let mode = if is_full {
+            AgentViewMode::Full
+        } else {
+            AgentViewMode::Compact
         };
-        let avail_mid = area.height.saturating_sub(head + foot);
-        let max_text = if area.height >= 20 { 16 } else { 12 };
+
+        let (banner_h, head_h, foot_h) = if is_full {
+            let head = if area.height >= 28 { 6 } else { 4 };
+            (3, head, 3)
+        } else {
+            let head = if area.height >= 14 { 2 } else { 1 };
+            let foot = if area.height >= 14 { 2 } else { 1 };
+            (0, head, foot)
+        };
+
+        let avail_mid = area.height.saturating_sub(banner_h + head_h + foot_h);
+        let max_text = if area.height >= 26 { 16 } else { 12 };
         let text_rows = avail_mid.saturating_sub(2).min(max_text).max(1);
         let body_height = (text_rows + 2).min(avail_mid);
 
@@ -110,14 +130,21 @@ impl AgentLayout {
         let body_width = configured_width.unwrap_or(72).max(20).min(available);
 
         Self {
-            header: Rect::new(area.x, area.y, area.width, head),
+            mode,
+            banner: Rect::new(area.x, area.y, area.width, banner_h),
+            header: Rect::new(area.x, area.y + banner_h, area.width, head_h),
             body: Rect::new(
                 area.x + indent.min(area.width),
-                area.y + head,
+                area.y + banner_h + head_h,
                 body_width,
                 body_height,
             ),
-            footer: Rect::new(area.x, area.y + head + body_height, area.width, foot),
+            footer: Rect::new(
+                area.x,
+                area.y + banner_h + head_h + body_height,
+                area.width,
+                foot_h,
+            ),
         }
     }
 
@@ -132,7 +159,7 @@ impl AgentLayout {
     }
 
     /// Net visible lines available for verbatim prose.
-    /// Subtracts the "● Assistant" and "⎿ Output complete" marker rows.
+    /// Subtracts the "● Assistant" and "[Output complete]" marker rows.
     pub fn net_text_height(&self) -> u16 {
         self.body.height.saturating_sub(2).max(1)
     }
@@ -231,28 +258,30 @@ mod tests {
 
     #[test]
     fn layout_matches_approved_grid_and_never_escapes_viewport() {
-        for (w, h, head, body, foot, cols, net_text) in [
-            (80, 24, 4, 17, 3, 72, 15),
-            (120, 30, 4, 18, 3, 72, 16),
-            (60, 18, 2, 14, 2, 54, 12),
+        for (w, h, mode, banner, head, body, foot, cols, net_text) in [
+            (80, 24, AgentViewMode::Full, 3, 4, 14, 3, 72, 12),
+            (120, 30, AgentViewMode::Full, 3, 6, 18, 3, 72, 16),
+            (60, 18, AgentViewMode::Compact, 0, 2, 14, 2, 54, 12),
         ] {
             let l = AgentLayout::new(Rect::new(0, 0, w, h), None);
             assert_eq!(
                 (
+                    l.mode,
+                    l.banner.height,
                     l.header.height,
                     l.body.height,
                     l.footer.height,
                     l.body.width,
                     l.net_text_height()
                 ),
-                (head, body, foot, cols, net_text)
+                (mode, banner, head, body, foot, cols, net_text)
             );
             assert!(l.net_text_height() >= 10 && l.net_text_height() <= 16);
         }
         for w in 0..=140 {
             for h in 0..=40 {
                 let l = AgentLayout::new(Rect::new(0, 0, w, h), Some(100));
-                for area in [l.header, l.body, l.footer] {
+                for area in [l.banner, l.header, l.body, l.footer] {
                     assert!(area.right() <= w && area.bottom() <= h);
                 }
             }
