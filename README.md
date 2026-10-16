@@ -8,7 +8,9 @@ bookmarks, stable reading progress, and portable reading data.
 
 | Document | Contents |
 | --- | --- |
-| [Usage](doc/usage.md) | Commands, keyboard controls, configuration, synchronization, and export |
+| [Documentation index](doc/README.md) | Reading order, document responsibilities, current vs target |
+| [Usage](doc/usage.md) | Implemented commands, controls, configuration and export |
+| [Agent reading design](doc/design/agent-terminal-reading.md) | Future UX target, not yet implemented |
 | [Architecture](doc/architecture.md) | Module responsibilities, data flow, and persistence invariants |
 | [Development](doc/development.md) | Build commands, verification, and test layout |
 | [Windows build setup](doc/Windows构建环境.md) | MSVC/GNU setup and troubleshooting (中文) |
@@ -23,7 +25,8 @@ bookmarks, stable reading progress, and portable reading data.
 - Managed imports that preserve source files and deduplicate identical content
 - Portable metadata sidecars and reading journals for folder synchronization
 - Reading-event export as JSON or CSV
-- Terminal-inherited colors, optional reading width, and Agent Terminal Mode (legacy Discreet Mode)
+- Terminal-inherited colors and optional reading width
+- Experimental Agent Terminal Mode (legacy Discreet Mode), a local simulation rather than a live AI agent; see [current behavior](doc/usage.md#agent-terminal-mode-current-implementation) and [design target](doc/design/agent-terminal-reading.md)
 
 ## Supported formats
 

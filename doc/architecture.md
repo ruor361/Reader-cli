@@ -25,13 +25,13 @@ All paths in this table are relative to `src/`.
 | `pagination.rs` | Unicode-width wrapping and runtime pages anchored to source positions |
 | `reader_state.rs` | Pure state transitions, navigation, overlays, notifications, and effects |
 | `reader_input.rs` | Reader key registries and key-to-action conversion |
-| `reader_view.rs` | Pure Ratatui body, HUD, notification, overlay, and Discreet Mode rendering |
+| `reader_view.rs` | Ratatui normal reading and experimental Agent Terminal rendering |
 | `tui.rs` | Reader event loop, effect execution, resize handling, sessions, and persistence |
 | `shelf.rs` | Local shelf, import/search/sort/removal, network switching, and `ShelfOutcome` |
 | `network.rs` | OPDS requests/parsing, authentication, URL/certificate checks, and validated download/import |
 | `network_shelf.rs` | Network shelf UI, catalog search/paging, and background request handling |
 | `ui.rs` | Shared semantic colors, key registry helpers, responsive HUD, help, and popup layout |
-| `discreet.rs` | Redacted diagnostics and adaptive decoration |
+| `discreet.rs` | Agent Terminal width calculations and legacy Discreet compatibility helpers |
 | `privacy.rs` | Deprecated compatibility exports for `discreet.rs` |
 
 Dependency versions belong in `Cargo.toml` and `Cargo.lock`.
@@ -108,16 +108,28 @@ applies effect values and uses a guard to restore the terminal on exit. Shared
 colors inherit the terminal palette. Reader and local shelf binding registries
 also generate HUD hints and help, so shortcut changes belong in those registries.
 
-Discreet Mode uses redacted diagnostics without real metadata or search queries.
-`privacy.rs` keeps old exports available; new implementation belongs in
-`discreet.rs`.
+### Agent view: implemented behavior versus target
 
-Discreet pagination prefers natural punctuation breaks only near the right edge
-of legal Unicode line-break segments, at body widths of 24 columns or more.
-It uses the same anchored-line builder as normal pagination; source coordinates
-remain unchanged. The discreet view renders these lines without secondary
-widget wrapping, retaining indentation. Log level keywords use terminal ANSI
-colors with a dim modifier while body text inherits the terminal foreground.
+The current `discreet_mode` flag selects a **simulated** Agent Terminal
+view: fixed four-row session header on ordinary heights, one broad book-text
+output area, a two-row range/prompt footer and an F12 folded state. It has
+no running LLM, command parser, or event-based conversation history.
+`reader_state.rs` still delegates to anchored pagination, with an Agent
+body width supplied by `discreet.rs` and rendered without a second wrap.
+The `privacy.rs` module maintains deprecated public compatibility exports.
+
+This current structure is **not the UX specification**. Consult
+[Agent Terminal reading design](design/agent-terminal-reading.md) for the
+future interaction model. Historical INFO/WARN/ERROR line-prefix rendering,
+per-line log coloring, and maximum-height tool output are no longer approved
+acceptance targets. Do not preserve tests of the old screen proportions
+solely because they exist.
+
+Keep reading-state transitions, source-position anchoring, rendering and
+filesystem effects separated. Transcript chunks are display projections of
+source `TextPosition` ranges; never persist fake session coordinates as
+reading progress. Session chrome may not display book titles, search queries,
+or private source paths.
 
 ## Text layout, line breaking, and display mapping
 

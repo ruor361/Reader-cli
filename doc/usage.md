@@ -71,8 +71,8 @@ requests removal of the book file, subject to the managed-folder checks in
 | `o` | Toggle page overlap context (1-line context on page turn) |
 | `M` | Show book information |
 | `s` | Show or hide reading progress |
-| `p` | Toggle Discreet Mode |
-| `F12` | Hide behind diagnostics / return |
+| `p` | Toggle Agent Terminal Mode (legacy Discreet Mode) |
+| `F12` | Fold reading output / return |
 | `?` / `F1` | Show available shortcuts |
 | `q` / `Ctrl+C` | Save and quit |
 
@@ -112,26 +112,27 @@ percentage, and text snippet. Navigate with `j`/`k`/arrows, press `Enter` to jum
 to the bookmark, press `d` to delete the selected bookmark, or `Esc` to close.
 
 
-Agent Terminal Mode (the existing `discreet_mode` configuration) renders a **simulated**
-coding-agent transcript instead of error logs. The screen has a fixed session header,
-a `Read workspace/context.txt` tool call, a large plain-text tool-output region,
-a neutral output line range, and a prompt. The labels and path are placeholders:
-**no AI model is invoked and no files are actually read by an agent**.
+## Agent Terminal Mode (current implementation)
 
-The reading text is still the current book. It is left-aligned, keeps natural
-punctuation breaks, preserves blank lines/indentation, and is not prefixed with
-timestamp/severity markers. A header of up to four rows and a footer of up to
-two rows leave the rest of the terminal height to the text. The text is normally
-64 terminal columns wide, adjustable through the existing `text_width` setting;
-narrow terminals automatically reduce it. The mode uses the existing
-screen-by-screen navigation keys, character-anchored progress, and bookmarks.
-It does not yet implement smooth or line-by-line scrolling.
+Press `p` to toggle the experimental Agent Terminal view (stored under the
+legacy `discreet_mode` configuration key).
 
-Press `p` to enter or leave Agent Terminal Mode. Press `F12` to immediately
-fold all reading output into an idle Agent transcript; press it again to return.
-The mode suppresses reader notifications, metadata, search queries, and UI
-shortcuts that would expose the book. A nearby viewer can still read visible
-text; this is a cosmetic low-exposure layout, not a privacy or security boundary.
+**Currently implemented in this branch:** a locally simulated, fixed-format
+session header and Read label; one large paginated block of book text as
+tool-like output; a displayed physical line range; and a **noninteractive**
+`❯ _` prompt. The labels are placeholders, no AI model is invoked, and
+the displayed Read label is not a tool execution. Supported `j` / `k`
+navigation remains screen-based. There is no conversational message history,
+interactive Agent command parser, or streaming response.
+
+Press `F12` to fold visible book text into a simulated idle transcript and
+press it again to restore it. Reader metadata and queries are not shown in
+the folded terminal view, but visible source text can still be seen before
+folding. This is not a privacy or security boundary.
+
+The **next UX target**, including meaningful event-to-action mapping and
+bounded response chunks, is [Agent Terminal design](design/agent-terminal-reading.md).
+That file is a target, not a claim of implemented behavior.
 
 ## Shelf controls
 
