@@ -9,7 +9,7 @@ use reader::bookshelf;
 use reader::cli::{BookmarkCommand, Cli, Command, ExportFormat, NetworkCommand, ShelfCommand};
 use reader::config::ReaderConfig;
 use reader::reading_data::{ReadingDataStore, ReadingEvent};
-use reader::shelf::{run_shelf_with_notice, ShelfOutcome};
+use reader::shelf::{run_shelf_unified, ShelfOutcome};
 use reader::storage::{LibraryBook, Store};
 use reader::tui::run_reader;
 use unicode_width::UnicodeWidthStr;
@@ -246,7 +246,9 @@ fn run_bookshelves(store: &mut Store, config: &mut ReaderConfig, mut network: bo
     let mut client = None;
     let mut notice = None;
     loop {
-        if network && client.is_none() {
+        let should_connect =
+            network || (config.network_library.enabled && config.network_library.url.is_some());
+        if should_connect && client.is_none() {
             match reader::network::NetworkClient::connect(&config.network_library) {
                 Ok(connection) => {
                     client = Some(connection);
@@ -259,26 +261,33 @@ fn run_bookshelves(store: &mut Store, config: &mut ReaderConfig, mut network: bo
                 }
             }
         }
-        let outcome = if network {
-            reader::network_shelf::run_network_shelf(
-                store,
-                config,
-                client.as_ref().expect("connected network client"),
-            )?
-        } else {
-            run_shelf_with_notice(store, config, None, notice.take())?
-        };
+        let outcome = run_shelf_unified(store, config, None, notice.take(), client.clone())?;
         match outcome {
             ShelfOutcome::Exit => break,
             ShelfOutcome::Open(book) => {
                 if let Err(err) = open_book_in_reader(book, store, config) {
                     notice = Some(format!("Cannot open book: {err:#}"));
-                    network = false;
                 }
             }
-            ShelfOutcome::Network => network = true,
+            ShelfOutcome::Network => {
+                network = true;
+                if client.is_none() {
+                    match reader::network::NetworkClient::connect(&config.network_library) {
+                        Ok(connection) => {
+                            client = Some(connection);
+                            config.network_library.enabled = true;
+                            config.save()?;
+                        }
+                        Err(err) => {
+                            notice = Some(format!("Network unavailable: {err:#}  [w] Retry"));
+                            network = false;
+                        }
+                    }
+                }
+            }
             ShelfOutcome::Local => {
                 network = false;
+                client = None;
                 config.network_library.enabled = false;
                 config.save()?;
             }

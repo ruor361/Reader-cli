@@ -704,7 +704,23 @@ fn handle_browse_key(
     config: &mut ReaderConfig,
 ) -> Result<Option<ShelfOutcome>> {
     match command_for(SHELF_BINDINGS, key) {
-        Some(ShelfCommandUi::Network) => return Ok(Some(ShelfOutcome::Network)),
+        Some(ShelfCommandUi::Network) => {
+            if app.network_client.is_some() {
+                app.cycle_filter();
+                return Ok(None);
+            } else {
+                return Ok(Some(ShelfOutcome::Network));
+            }
+        }
+        Some(ShelfCommandUi::SyncNetwork) => {
+            if app.network_client.is_some() {
+                app.sync_network();
+                app.message = "Syncing network books...".into();
+            } else {
+                app.message = "Network not connected. Press w to connect.".into();
+            }
+            return Ok(None);
+        }
         Some(ShelfCommandUi::Quit) => return Ok(Some(ShelfOutcome::Exit)),
         Some(ShelfCommandUi::Next) => app.move_selection(1),
         Some(ShelfCommandUi::Previous) => app.move_selection(-1),
@@ -735,11 +751,14 @@ fn handle_browse_key(
         Some(ShelfCommandUi::Sort) => app.cycle_sort(),
         Some(ShelfCommandUi::Help) => app.mode = ShelfMode::Help,
         Some(ShelfCommandUi::Delete) => {
-            if app.selected_row().is_some() {
-                app.mode = ShelfMode::ConfirmDelete;
-                if let Some(row) = app.selected_row() {
-                    app.message = format!("Delete {:?}? (y/n)", row.title);
+            if let Some(row) = app.selected_row() {
+                if matches!(row.source, BookSource::Remote(_)) {
+                    app.message = "Cannot delete a remote book".to_string();
+                    return Ok(None);
                 }
+                let title = row.title.clone();
+                app.mode = ShelfMode::ConfirmDelete;
+                app.message = format!("Delete {:?}? (y/n)", title);
             } else {
                 app.message = "Nothing to delete".to_string();
             }
@@ -765,16 +784,36 @@ fn handle_browse_key(
                 app.message = "No book selected".to_string();
                 return Ok(None);
             };
-            let id = row.id.clone();
-            if row.missing {
-                app.message =
-                    "Book file is missing. Restore it under bookshelf_dir and refresh.".to_string();
-                return Ok(None);
+            match &row.source {
+                BookSource::Local => {
+                    let id = row.id.clone();
+                    if row.missing {
+                        app.message =
+                            "Book file is missing. Restore it under bookshelf_dir and refresh."
+                                .to_string();
+                        return Ok(None);
+                    }
+                    let Some(entry) = store.library().books().iter().find(|b| b.id == id).cloned()
+                    else {
+                        bail!("Selected book disappeared from library");
+                    };
+                    return Ok(Some(ShelfOutcome::Open(entry)));
+                }
+                BookSource::Remote(remote) => {
+                    if app.pending_download.is_some() {
+                        app.message = "Download already in progress...".to_string();
+                        return Ok(None);
+                    }
+                    if let Some(client) = &app.network_client {
+                        let client = client.clone();
+                        let remote = remote.clone();
+                        app.start_download(client, remote);
+                    } else {
+                        app.message = "Network not connected".to_string();
+                    }
+                    return Ok(None);
+                }
             }
-            let Some(entry) = store.library().books().iter().find(|b| b.id == id).cloned() else {
-                bail!("Selected book disappeared from library");
-            };
-            return Ok(Some(ShelfOutcome::Open(entry)));
         }
         _ => {}
     }
@@ -995,18 +1034,30 @@ fn draw(frame: &mut ratatui::Frame<'_>, app: &ShelfApp, store: &Store, _config: 
             Span::styled("Import: ", palette.accent()),
             Span::styled(app.query.clone(), palette.body()),
         ]),
-        _ => Line::from(vec![
-            Span::styled("My Library", palette.accent()),
-            Span::styled(
-                format!(
-                    "  {} of {} books  ·  sort: {}",
-                    app.visible.len(),
-                    app.books.len(),
-                    app.sort.label()
+        _ => {
+            let filter_info = match app.filter {
+                ShelfFilter::All => "",
+                ShelfFilter::Local => "  ·  view: local",
+                ShelfFilter::Remote => "  ·  view: cloud",
+            };
+            let sync_info = if app.is_syncing_network {
+                "  ·  syncing..."
+            } else {
+                ""
+            };
+            Line::from(vec![
+                Span::styled("My Library", palette.accent()),
+                Span::styled(
+                    format!(
+                        "  {} of {} books  ·  sort: {}{filter_info}{sync_info}",
+                        app.visible.len(),
+                        app.books.len(),
+                        app.sort.label()
+                    ),
+                    palette.body(),
                 ),
-                palette.body(),
-            ),
-        ]),
+            ])
+        }
     };
     frame.render_widget(Paragraph::new(status).style(palette.base()), status_area);
 
@@ -1112,7 +1163,16 @@ fn build_row_line(
     } else {
         format!("{}bm", row.bookmark_count)
     };
-    let status = if row.missing { "MISS" } else { "OK" };
+    let status = match &row.source {
+        BookSource::Local => {
+            if row.missing {
+                "MISS"
+            } else {
+                "OK"
+            }
+        }
+        BookSource::Remote(_) => "NET",
+    };
     let format = row.format.label();
     let text = format!(
         "{prefix}{marker} {title}  {author}  {bar} {percent:>3}%  {last:>10}  {bookmarks:>4}  {format} {status}"
@@ -1121,6 +1181,8 @@ fn build_row_line(
         palette.selected()
     } else if row.missing {
         palette.error()
+    } else if matches!(row.source, BookSource::Remote(_)) {
+        palette.accent()
     } else {
         palette.body()
     };
@@ -1284,6 +1346,7 @@ mod tests {
             bookmark_count: 0,
             path: PathBuf::from(format!("/tmp/{id}.txt")),
             missing: false,
+            source: BookSource::Local,
         }
     }
 
@@ -1442,6 +1505,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         app.recompute_visible();
         assert_eq!(app.visible.len(), 2);
@@ -1459,6 +1527,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         app.books[1].author = Some("Rustacean".into());
         app.query = "rust".into();
@@ -1489,6 +1562,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         app.recompute_visible();
         assert_eq!(app.books[app.visible[0]].id, "c");
@@ -1512,6 +1590,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         app.recompute_visible();
         let titles: Vec<&str> = app
@@ -1538,6 +1621,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         app.books[0].progress_tenths = 500;
         app.books[1].progress_tenths = 250;
@@ -1563,6 +1651,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         app.cycle_sort();
         assert_eq!(app.sort, ShelfSort::Title);
@@ -1588,6 +1681,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         app.move_selection(-1);
         assert_eq!(app.selection, 2);
@@ -1637,6 +1735,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         let outcome = handle_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -1661,6 +1764,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         let outcome = handle_key(
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
@@ -1716,6 +1824,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         let outcome = handle_key(
             KeyEvent::new(KeyCode::Char('r'), KeyModifiers::NONE),
@@ -1740,6 +1853,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         let outcome = handle_key(
             KeyEvent::new(KeyCode::Char('q'), KeyModifiers::NONE),
@@ -1764,6 +1882,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         handle_key(
             KeyEvent::new(KeyCode::Enter, KeyModifiers::NONE),
@@ -1794,6 +1917,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         handle_key(
             KeyEvent::new(KeyCode::Esc, KeyModifiers::NONE),
@@ -1849,6 +1977,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: "Delete \"Book\"? (y/n)".into(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         let outcome = handle_key(
             KeyEvent::new(KeyCode::Char('y'), KeyModifiers::NONE),
@@ -1877,6 +2010,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 24),
             message: "Delete \"Book\"? (y/n)".into(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         let outcome = handle_key(
             KeyEvent::new(KeyCode::Char('n'), KeyModifiers::NONE),
@@ -1960,6 +2098,11 @@ mod tests {
             viewport: Rect::new(0, 0, 80, 20),
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         app.books[0].progress_tenths = 500;
         let config = ReaderConfig::default();
@@ -1975,5 +2118,211 @@ mod tests {
         let screen = format!("{}", terminal.backend());
         assert!(screen.contains("Shelf help"));
         assert!(screen.contains("Open selected book"));
+    }
+
+    #[test]
+    fn sort_recent_puts_read_local_before_unread_network() {
+        let now = SystemTime::now();
+        let mut app = ShelfApp {
+            books: vec![
+                ShelfRow {
+                    id: "net1".into(),
+                    title: "Zebra Network Book".into(),
+                    author: None,
+                    format: BookFormat::Epub,
+                    progress_tenths: 0,
+                    last_opened: None,
+                    bookmark_count: 0,
+                    missing: false,
+                    path: PathBuf::new(),
+                    source: BookSource::Remote(crate::network::RemoteBook {
+                        id: "net1".into(),
+                        title: "Zebra Network Book".into(),
+                        author: None,
+                        format: Some(BookFormat::Epub),
+                        download_url: Some(
+                            reqwest::Url::parse("https://example.com/b.epub").unwrap(),
+                        ),
+                    }),
+                },
+                ShelfRow {
+                    id: "local_read".into(),
+                    title: "Alpha Read Local".into(),
+                    author: None,
+                    format: BookFormat::Txt,
+                    progress_tenths: 100,
+                    last_opened: Some(now),
+                    bookmark_count: 0,
+                    missing: false,
+                    path: PathBuf::from("/tmp/a.txt"),
+                    source: BookSource::Local,
+                },
+                ShelfRow {
+                    id: "net2".into(),
+                    title: "Apple Network Book".into(),
+                    author: None,
+                    format: BookFormat::Epub,
+                    progress_tenths: 0,
+                    last_opened: None,
+                    bookmark_count: 0,
+                    missing: false,
+                    path: PathBuf::new(),
+                    source: BookSource::Remote(crate::network::RemoteBook {
+                        id: "net2".into(),
+                        title: "Apple Network Book".into(),
+                        author: None,
+                        format: Some(BookFormat::Epub),
+                        download_url: Some(
+                            reqwest::Url::parse("https://example.com/a.epub").unwrap(),
+                        ),
+                    }),
+                },
+            ],
+            visible: vec![],
+            selection: 0,
+            sort: ShelfSort::Recent,
+            query: String::new(),
+            mode: ShelfMode::Browse,
+            viewport: Rect::new(0, 0, 80, 24),
+            message: String::new(),
+            pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
+        };
+        app.recompute_visible();
+        let ordered_ids: Vec<&str> = app
+            .visible
+            .iter()
+            .map(|&i| app.books[i].id.as_str())
+            .collect();
+        assert_eq!(ordered_ids, vec!["local_read", "net2", "net1"]);
+    }
+
+    #[test]
+    fn merge_remote_books_deduplicates_with_local() {
+        let dir = tempfile::tempdir().unwrap();
+        let path = dir.path().join("book.txt");
+        std::fs::write(&path, "content").unwrap();
+        let document = crate::book::BookDocument {
+            id: "local_id".into(),
+            title: "Same Title".into(),
+            path: path.clone(),
+            format: crate::book::BookFormat::Txt,
+            metadata: crate::book::BookMetadata {
+                title: "Same Title".into(),
+                author: Some("Author A".into()),
+                language: None,
+                publisher: None,
+                format: crate::book::BookFormat::Txt,
+                path: path.clone(),
+                section_count: 1,
+            },
+            sections: vec![crate::book::Section {
+                title: "S".into(),
+                text: "content".into(),
+            }],
+            contents: vec![],
+            contents_source: crate::book::ContentsSource::Generated,
+        };
+        let mut store = Store::open(dir.path().join("library.json")).unwrap();
+        store.add_book(&document, &document.path).unwrap();
+
+        let mut app = ShelfApp::new(&store, Rect::new(0, 0, 80, 24), None);
+        assert_eq!(app.books.len(), 1);
+
+        let remotes = vec![
+            crate::network::RemoteBook {
+                id: "remote_dup".into(),
+                title: "Same Title".into(),
+                author: Some("Author A".into()),
+                format: Some(BookFormat::Epub),
+                download_url: Some(reqwest::Url::parse("https://example.com/1.epub").unwrap()),
+            },
+            crate::network::RemoteBook {
+                id: "remote_new".into(),
+                title: "Different Title".into(),
+                author: Some("Author B".into()),
+                format: Some(BookFormat::Epub),
+                download_url: Some(reqwest::Url::parse("https://example.com/2.epub").unwrap()),
+            },
+        ];
+
+        app.merge_remote_books(remotes, &store);
+        // Only 1 duplicate skipped, 1 new added => total 2 books
+        assert_eq!(app.books.len(), 2);
+        assert_eq!(app.books[0].id, "local_id");
+        assert_eq!(app.books[1].id, "remote_new");
+    }
+
+    #[test]
+    fn cycle_filter_cycles_through_all_local_remote() {
+        let mut app = ShelfApp {
+            books: vec![
+                ShelfRow {
+                    id: "local".into(),
+                    title: "Local Book".into(),
+                    author: None,
+                    format: BookFormat::Txt,
+                    progress_tenths: 0,
+                    last_opened: None,
+                    bookmark_count: 0,
+                    missing: false,
+                    path: PathBuf::new(),
+                    source: BookSource::Local,
+                },
+                ShelfRow {
+                    id: "remote".into(),
+                    title: "Remote Book".into(),
+                    author: None,
+                    format: BookFormat::Epub,
+                    progress_tenths: 0,
+                    last_opened: None,
+                    bookmark_count: 0,
+                    missing: false,
+                    path: PathBuf::new(),
+                    source: BookSource::Remote(crate::network::RemoteBook {
+                        id: "remote".into(),
+                        title: "Remote Book".into(),
+                        author: None,
+                        format: Some(BookFormat::Epub),
+                        download_url: Some(
+                            reqwest::Url::parse("https://example.com/r.epub").unwrap(),
+                        ),
+                    }),
+                },
+            ],
+            visible: vec![],
+            selection: 0,
+            sort: ShelfSort::Title,
+            query: String::new(),
+            mode: ShelfMode::Browse,
+            viewport: Rect::new(0, 0, 80, 24),
+            message: String::new(),
+            pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
+        };
+        app.recompute_visible();
+        assert_eq!(app.visible.len(), 2);
+
+        app.cycle_filter();
+        assert_eq!(app.filter, ShelfFilter::Local);
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.books[app.visible[0]].id, "local");
+
+        app.cycle_filter();
+        assert_eq!(app.filter, ShelfFilter::Remote);
+        assert_eq!(app.visible.len(), 1);
+        assert_eq!(app.books[app.visible[0]].id, "remote");
+
+        app.cycle_filter();
+        assert_eq!(app.filter, ShelfFilter::All);
+        assert_eq!(app.visible.len(), 2);
     }
 }

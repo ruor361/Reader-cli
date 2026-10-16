@@ -144,12 +144,13 @@ missing-file status. After a launched reader quits, you return to the shelf.
 | `j` / `k` / arrows | Move the selection |
 | `g` / `G` | Go to the first / last book |
 | `PageDown` / `PageUp` | Move by 10 books |
-| `Enter` | Open the selected book |
+| `Enter` | Open selected book (or download & read remote book) |
 | `r` | Resume the most recently opened book |
 | `i` | Import a book by pasting or typing its path |
 | `/` | Filter by title or author |
 | `s` | Sort by recent activity, title, or progress |
-| `w` | Switch to the network bookshelf |
+| `w` | Cycle view filter (all / local / cloud) or connect network |
+| `R` | Sync network bookshelf |
 | `d` | Start removal of the selected book with confirmation |
 | `?` / `F1` | Show shelf help |
 | `q` / `Esc` / `Ctrl+C` | Quit |
@@ -259,12 +260,16 @@ Exports represent recorded sessions rather than an aggregated reading report.
 
 ## Network bookshelf (Calibre-Web / Calibre-Web Automated)
 
-Configure a server once, then switch between local and network books with `w`:
+Configure a server once, and `reader shelf` unifies local and remote books with default sorting by recent reading activity:
 
 ```sh
 reader network configure https://books.example --username YOUR_USERNAME
 reader shelf
 ```
+
+The unified shelf automatically combines local books with network books and sorts them by `Recent`: books with local reading history are placed first in descending order of last opened time, followed by unread local books and remote books sorted alphabetically. Network books are deduplicated against local books (matching title and author) and labeled with a `NET` status. Press `Enter` on any remote book to download and import it in the background, then launch reading immediately. When you exit reading, the book becomes a local book with fresh reading progress and appears at the top of your recent list.
+
+Press `w` in the shelf to cycle between view filters: `all` (combined), `local` (local books only), and `cloud` (remote books only). Press `R` to sync and refresh the remote catalog. Run `reader network off` to disable network loading.
 
 The address may be the website root or its `/opds` endpoint, including a reverse
 proxy subpath. The server must enable OPDS and grant the account download access.
@@ -272,13 +277,9 @@ When authentication is required, Reader asks for the password with hidden input
 before entering the network view, unless credentials were supplied through
 environment variables or a local `.env`. It stores the configured address,
 username, and view switch; it never copies the password into `configuration.json`.
-The switch is remembered for the next launch. Press `w` in the network view to
-return to local books, or run `reader network off`.
+The switch is remembered for the next launch.
 
-In the network view, `/` searches the server catalog by title or author, `n` / `p`
-change catalog pages, `R` reloads the current page, and `Enter` downloads and opens
-the selected book. Requests run in the background; `w` and `q` remain available
-while a request is pending. Downloads are validated and imported into the existing
+Downloads are validated and imported into the existing
 local `bookshelf_dir` (set with `reader refresh <DIR>`). Local reading progress and
 bookmarks keep working after download, including offline reading. Reader accesses
 the remote server through GET requests and does not synchronize Calibre-Web's

@@ -899,29 +899,46 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
             AgentDensity::Inspect => "inspect",
         };
 
+        // Realistic coding agent review animation & live traces
+        let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+        let now_millis = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .map(|d| d.as_millis())
+            .unwrap_or(0);
+        let spin_idx = ((now_millis / 120) % (spinner_frames.len() as u128)) as usize;
+        let spinner = agent_symbol(spinner_frames[spin_idx], "*");
+
         let mut lines = vec![
             inspect_line,
             Line::from(vec![
                 Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
                 Span::styled("Context initialized", palette.body()),
             ]),
-            Line::styled("  source: local text corpus · workspace: Reader-cli", palette.muted()),
-            Line::styled("  mode: interactive · context: ready", palette.muted()),
-            Line::from(vec![
-                Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
-                Span::styled(
-                    format!(
-                        "Inspect source structure · Format: {format_label} · Sections: {section_count} ({current_section})"
-                    ),
-                    palette.body(),
-                ),
-            ]),
+            Line::styled("  workspace: Reader-cli · session: code-review", palette.muted()),
             Line::styled(
-                format!("  {} Encoding: UTF-8 · chunking: paragraph-aware", agent_symbol("⎿", "\\")),
+                format!(
+                    "  {} Inspecting source structure · Format: {format_label} · Sections: {section_count} ({current_section})",
+                    agent_symbol("⎿", "\\")
+                ),
                 palette.muted(),
             ),
             tool_call_line,
             tool_res_line,
+            Line::from(vec![
+                Span::styled(format!("{spinner} "), palette.accent()),
+                Span::styled(
+                    format!("Running code review analyzer... reading AST for section {current_section}"),
+                    palette.accent(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("  {} Running command: ", agent_symbol("❯", ">")), palette.muted()),
+                Span::styled("cargo clippy --workspace --all-targets -- -D warnings", palette.body()),
+            ]),
+            Line::styled(
+                "  _Tip: Pass `--fix` to automatically apply suggestions where supported.",
+                palette.muted(),
+            ),
             Line::from(vec![
                 Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
                 Span::styled(
