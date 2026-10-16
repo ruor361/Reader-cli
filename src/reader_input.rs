@@ -495,6 +495,7 @@ pub(crate) const LOCAL_COMMANDS: &[(&str, ReaderAction)] = &[
     ("up", ReaderAction::ScrollLines(-2)),
     ("checkpoint", ReaderAction::AddBookmark),
     ("density", ReaderAction::ToggleDensity),
+    ("lines", ReaderAction::SetAgentLines(None)),
     ("fold", ReaderAction::ToggleHidden),
     ("normal", ReaderAction::ToggleDiscreet),
     ("help", ReaderAction::OpenHelp),

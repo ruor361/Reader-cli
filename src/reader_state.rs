@@ -127,6 +127,7 @@ pub(crate) enum ReaderAction {
     OpenCommand,
     CompleteCommand,
     ToggleDensity,
+    SetAgentLines(Option<u16>),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -312,6 +313,19 @@ impl ReaderState {
                     });
                 }
                 Vec::new()
+            }
+            ReaderAction::SetAgentLines(lines) => {
+                if self.config.discreet_mode {
+                    self.config.agent_lines = lines;
+                    self.reflow_agent();
+                    self.agent.receipt = Some(match lines {
+                        Some(_) => "Agent rows updated",
+                        None => "Agent rows: auto",
+                    });
+                    vec![ReaderEffect::SaveConfig]
+                } else {
+                    Vec::new()
+                }
             }
             ReaderAction::Exit => vec![ReaderEffect::Exit],
             ReaderAction::NextScreen => self.move_screen(1),
@@ -632,7 +646,11 @@ impl ReaderState {
 
     fn reflow_agent(&mut self) {
         if self.config.discreet_mode {
-            let layout = AgentLayout::new(self.viewport, self.config.text_width);
+            let layout = AgentLayout::with_options(
+                self.viewport,
+                self.config.text_width,
+                self.config.agent_lines,
+            );
             if layout.body.width == 0 || layout.body.height == 0 {
                 return;
             }
@@ -648,7 +666,14 @@ impl ReaderState {
     }
 
     fn agent_body_height(&self) -> usize {
-        usize::from(AgentLayout::new(self.viewport, self.config.text_width).net_text_height())
+        usize::from(
+            AgentLayout::with_options(
+                self.viewport,
+                self.config.text_width,
+                self.config.agent_lines,
+            )
+            .net_text_height(),
+        )
     }
 
     fn scroll_agent(&mut self, delta: isize, overlap: bool) -> Vec<ReaderEffect> {
@@ -724,11 +749,26 @@ impl ReaderState {
                 }
             }
             ReaderAction::Confirm => {
+                let text = self.agent.command.take().unwrap_or_default();
+                let trimmed = text.trim();
+                if let Some(arg) = trimmed
+                    .strip_prefix("lines")
+                    .or_else(|| trimmed.strip_prefix("agent-lines"))
+                {
+                    let arg = arg.trim();
+                    if arg.is_empty() || arg == "auto" || arg == "0" {
+                        return self.update(ReaderAction::SetAgentLines(None));
+                    } else if let Ok(n) = arg.parse::<u16>() {
+                        return self.update(ReaderAction::SetAgentLines(Some(n)));
+                    } else {
+                        self.agent.receipt = Some("Usage: :lines <N> or :lines auto");
+                        return Vec::new();
+                    }
+                }
                 let action = crate::reader_input::LOCAL_COMMANDS
                     .iter()
-                    .find(|(name, _)| *name == input.trim())
+                    .find(|(name, _)| *name == trimmed)
                     .map(|(_, action)| *action);
-                self.agent.command = None;
                 if let Some(action) = action {
                     return self.update(action);
                 }
@@ -1068,6 +1108,7 @@ fn action_is_available_in_discreet(action: ReaderAction) -> bool {
             | ReaderAction::ResetTextWidth
             | ReaderAction::TogglePageOverlap
             | ReaderAction::ToggleDensity
+            | ReaderAction::SetAgentLines(_)
     )
 }
 

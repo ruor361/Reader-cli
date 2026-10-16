@@ -822,8 +822,214 @@ fn split_row_line(
     Line::from(spans)
 }
 
+fn generate_agent_header_lines(
+    target_height: usize,
+    state: &ReaderState,
+    palette: Palette,
+    start: usize,
+    end: usize,
+) -> Vec<Line<'static>> {
+    if target_height == 0 {
+        return Vec::new();
+    }
+    let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
+    let now_millis = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .map(|d| d.as_millis())
+        .unwrap_or(0);
+    let spin_idx = ((now_millis / 100) % (spinner_frames.len() as u128)) as usize;
+    let spinner = agent_symbol(spinner_frames[spin_idx], "*");
+    let section_count = state.document.sections.len();
+    let current_section = state.current_section() + 1;
+    let tip = match (now_millis / 4000) % 4 {
+        0 => "_Tip: When fixing lifetime warnings, check reference scopes first.",
+        1 => "_Tip: Pass `--fix` to automatically apply suggestions where supported.",
+        2 => "_Tip: Use `cargo check --tests` to verify test harness coverage quickly.",
+        _ => "_Tip: Keep data mutations localized to minimize lock contention.",
+    };
+
+    let inspect_line = Line::from(vec![
+        Span::styled(format!("{} ", agent_symbol("❯", ">")), palette.accent()),
+        Span::styled("inspect context", palette.body()),
+    ]);
+    let tool_call_line = Line::from(vec![
+        Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+        Span::styled("Read(local chunk)", palette.body()),
+    ]);
+    let tool_res_line = Line::from(vec![Span::styled(
+        format!(
+            "  {} Loaded source range {start}–{end}",
+            agent_symbol("⎿", "\\")
+        ),
+        palette.muted(),
+    )]);
+
+    if target_height == 1 {
+        return vec![Line::from(vec![
+            Span::styled(format!("{spinner} "), palette.accent()),
+            Span::styled(
+                format!("Reviewing AST · Read(local chunk) · range {start}–{end}"),
+                palette.body(),
+            ),
+        ])];
+    }
+    if target_height == 2 {
+        return vec![
+            Line::from(vec![
+                Span::styled(format!("{spinner} "), palette.accent()),
+                Span::styled(
+                    format!(
+                        "Running code review analyzer... reading AST section {current_section}"
+                    ),
+                    palette.accent(),
+                ),
+            ]),
+            Line::from(vec![
+                Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+                Span::styled(
+                    format!("Read(local chunk) · range {start}–{end} · Loaded source range"),
+                    palette.body(),
+                ),
+            ]),
+        ];
+    }
+    if target_height == 3 {
+        return vec![
+            Line::from(vec![
+                Span::styled(format!("{spinner} "), palette.accent()),
+                Span::styled(
+                    format!("Running code review analyzer... reading section {current_section}"),
+                    palette.accent(),
+                ),
+            ]),
+            tool_call_line,
+            tool_res_line,
+        ];
+    }
+
+    let format_label = match state.document.format {
+        crate::book::BookFormat::Epub => "EPUB",
+        crate::book::BookFormat::Pdf => "PDF",
+        crate::book::BookFormat::Txt => "TXT",
+        crate::book::BookFormat::Mobi => "MOBI",
+    };
+    let density_label = match state.agent.density {
+        AgentDensity::Comfortable => "comfortable",
+        AgentDensity::Inspect => "inspect",
+    };
+
+    let mut pool: Vec<Line<'static>> = vec![
+        inspect_line,
+        Line::from(vec![
+            Span::styled(format!("{spinner} "), palette.accent()),
+            Span::styled(
+                format!("Running code review analyzer... reading AST for section {current_section}/{section_count}"),
+                palette.accent(),
+            ),
+        ]),
+        Line::from(vec![
+            Span::styled(format!("  {} Running command -- ", agent_symbol("❯", ">")), palette.muted()),
+            Span::styled("cargo clippy --workspace --all-targets -- -D warnings", palette.body()),
+        ]),
+        Line::styled(format!("  {tip}"), palette.muted()),
+        Line::from(vec![
+            Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+            Span::styled("Context initialized", palette.body()),
+        ]),
+        Line::styled("  workspace: Reader-cli · session: local · mode: audit", palette.muted()),
+        tool_call_line,
+        tool_res_line,
+        Line::styled(
+            format!(
+                "  {} Target: {format_label} · Sections: {section_count} · Encoding: UTF-8",
+                agent_symbol("⎿", "\\")
+            ),
+            palette.muted(),
+        ),
+        Line::from(vec![
+            Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+            Span::styled(
+                format!("Context updated · Waiting for continuation · density: {density_label}"),
+                palette.muted(),
+            ),
+        ]),
+        Line::styled("  ✓ Unicode Standard Annex #14 line-breaking engine active (Unicode 15.0.0)", palette.muted()),
+        Line::from(vec![
+            Span::styled(format!("  {} ", agent_symbol("●", "*")), palette.accent()),
+            Span::styled(r#"read_file path="src/discreet.rs" offset=1 limit=12"#, palette.body()),
+        ]),
+        Line::styled(format!("    {} Checked layout bounds & zero-leakage frame isolation [OK]", agent_symbol("⎿", "\\")), palette.muted()),
+        Line::from(vec![
+            Span::styled(format!("  {} ", agent_symbol("●", "*")), palette.accent()),
+            Span::styled(r#"read_file path="src/reader_view.rs" offset=825 limit=16"#, palette.body()),
+        ]),
+        Line::styled(format!("    {} Validated terminal view renderer & palette inheritance [OK]", agent_symbol("⎿", "\\")), palette.muted()),
+        Line::from(vec![
+            Span::styled(format!("  {} ", agent_symbol("●", "*")), palette.accent()),
+            Span::styled(r#"read_file path="src/pagination.rs" offset=40 limit=10"#, palette.body()),
+        ]),
+        Line::styled(format!("    {} Verified stable TextPosition character anchors across reflow [OK]", agent_symbol("⎿", "\\")), palette.muted()),
+        Line::styled("  Memory: AST cache warm · 18,420 syntax nodes indexed", palette.muted()),
+        Line::styled("  Worker: background disk persistence channel idle (0 queued)", palette.muted()),
+        Line::styled("  Snapshot: journal transaction committed · durable barrier synced", palette.muted()),
+        Line::from(vec![
+            Span::styled(format!("  {} ", agent_symbol("●", "*")), palette.accent()),
+            Span::styled(r#"read_file path="src/book.rs" offset=1 limit=20"#, palette.body()),
+        ]),
+        Line::styled(format!("    {} Checked format decoders (EPUB/PDF/TXT/MOBI) [OK]", agent_symbol("⎿", "\\")), palette.muted()),
+        Line::from(vec![
+            Span::styled(format!("  {} ", agent_symbol("●", "*")), palette.accent()),
+            Span::styled(r#"read_file path="src/storage.rs" offset=100 limit=15"#, palette.body()),
+        ]),
+        Line::styled(format!("    {} Verified SHA-256 deduplication and sidecar journal sync [OK]", agent_symbol("⎿", "\\")), palette.muted()),
+        Line::from(vec![
+            Span::styled(format!("  {} ", agent_symbol("●", "*")), palette.accent()),
+            Span::styled(r#"read_file path="src/tui.rs" offset=50 limit=16"#, palette.body()),
+        ]),
+        Line::styled(format!("    {} Verified ConPTY event loop and alternate screen guards [OK]", agent_symbol("⎿", "\\")), palette.muted()),
+        Line::from(vec![
+            Span::styled(format!("  {} ", agent_symbol("●", "*")), palette.accent()),
+            Span::styled(r#"read_file path="src/shelf.rs" offset=30 limit=14"#, palette.body()),
+        ]),
+        Line::styled(format!("    {} Reconciled bookshelf store, sidecars, and OPDS feeds [OK]", agent_symbol("⎿", "\\")), palette.muted()),
+    ];
+
+    if target_height <= pool.len() {
+        pool.truncate(target_height);
+        pool
+    } else {
+        let mut lines = pool;
+        let mut idx = 1;
+        while lines.len() < target_height {
+            lines.push(Line::from(vec![
+                Span::styled(format!("  {} ", agent_symbol("●", "*")), palette.accent()),
+                Span::styled(
+                    format!(r#"read_chunk index={idx} status=synced hash=verified"#),
+                    palette.muted(),
+                ),
+            ]));
+            if lines.len() < target_height {
+                lines.push(Line::styled(
+                    format!(
+                        "    {} Verified AST node consistency for block #{idx} [OK]",
+                        agent_symbol("⎿", "\\")
+                    ),
+                    palette.muted(),
+                ));
+            }
+            idx += 1;
+        }
+        lines.truncate(target_height);
+        lines
+    }
+}
+
 fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: Palette) {
-    let layout = AgentLayout::new(frame.area(), state.config.text_width);
+    let layout = AgentLayout::with_options(
+        frame.area(),
+        state.config.text_width,
+        state.config.agent_lines,
+    );
     if frame.area().height < 6 || layout.body.width == 0 {
         frame.render_widget(
             Paragraph::new("Resize terminal").style(palette.muted()),
@@ -869,104 +1075,13 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
     }
 
     // 2. Session Context & Tool Activity (header)
-    let inspect_line = Line::from(vec![
-        Span::styled(format!("{} ", agent_symbol("❯", ">")), palette.accent()),
-        Span::styled("inspect context", palette.body()),
-    ]);
-    let tool_call_line = Line::from(vec![
-        Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
-        Span::styled("Read(local chunk)", palette.body()),
-    ]);
-    let tool_res_line = Line::from(vec![Span::styled(
-        format!(
-            "  {} Loaded source range {start}–{end}",
-            agent_symbol("⎿", "\\")
-        ),
-        palette.muted(),
-    )]);
-
-    let header_lines = if layout.mode == AgentViewMode::Full {
-        let format_label = match state.document.format {
-            crate::book::BookFormat::Epub => "EPUB",
-            crate::book::BookFormat::Pdf => "PDF",
-            crate::book::BookFormat::Txt => "TXT",
-            crate::book::BookFormat::Mobi => "MOBI",
-        };
-        let section_count = state.document.sections.len();
-        let current_section = state.current_section() + 1;
-        let density_label = match state.agent.density {
-            AgentDensity::Comfortable => "comfortable",
-            AgentDensity::Inspect => "inspect",
-        };
-
-        // Realistic coding agent review animation & live traces
-        let spinner_frames = ["⠋", "⠙", "⠹", "⠸", "⠼", "⠴", "⠦", "⠧", "⠇", "⠏"];
-        let now_millis = std::time::SystemTime::now()
-            .duration_since(std::time::UNIX_EPOCH)
-            .map(|d| d.as_millis())
-            .unwrap_or(0);
-        let spin_idx = ((now_millis / 120) % (spinner_frames.len() as u128)) as usize;
-        let spinner = agent_symbol(spinner_frames[spin_idx], "*");
-
-        let mut lines = vec![
-            inspect_line,
-            Line::from(vec![
-                Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
-                Span::styled("Context initialized", palette.body()),
-            ]),
-            Line::styled("  workspace: Reader-cli · session: code-review", palette.muted()),
-            Line::styled(
-                format!(
-                    "  {} Inspecting source structure · Format: {format_label} · Sections: {section_count} ({current_section})",
-                    agent_symbol("⎿", "\\")
-                ),
-                palette.muted(),
-            ),
-            tool_call_line,
-            tool_res_line,
-            Line::from(vec![
-                Span::styled(format!("{spinner} "), palette.accent()),
-                Span::styled(
-                    format!("Running code review analyzer... reading AST for section {current_section}"),
-                    palette.accent(),
-                ),
-            ]),
-            Line::from(vec![
-                Span::styled(format!("  {} Running command: ", agent_symbol("❯", ">")), palette.muted()),
-                Span::styled("cargo clippy --workspace --all-targets -- -D warnings", palette.body()),
-            ]),
-            Line::styled(
-                "  _Tip: Pass `--fix` to automatically apply suggestions where supported.",
-                palette.muted(),
-            ),
-            Line::from(vec![
-                Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
-                Span::styled(
-                    format!(
-                        "Context updated · Waiting for continuation · density: {density_label}"
-                    ),
-                    palette.muted(),
-                ),
-            ]),
-        ];
-        lines.truncate(usize::from(layout.header.height));
-        lines
-    } else {
-        match layout.header.height {
-            1 => vec![Line::from(vec![
-                Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
-                Span::styled(
-                    format!("Read(local chunk) · range {start}–{end}"),
-                    palette.body(),
-                ),
-            ])],
-            _ => {
-                let mut lines = vec![tool_call_line, tool_res_line];
-                lines.truncate(usize::from(layout.header.height));
-                lines
-            }
-        }
-    };
+    let header_lines = generate_agent_header_lines(
+        usize::from(layout.header.height),
+        state,
+        palette,
+        start,
+        end,
+    );
     frame.render_widget(Paragraph::new(header_lines), layout.header);
 
     // 3. Assistant Response (body)
@@ -1490,6 +1605,46 @@ mod tests {
             // Region 4: Input / Action
             assert!(screen.contains("continue_"));
         }
+    }
+
+    #[test]
+    fn high_terminal_mode_populates_full_agent_lines_without_empty_space() {
+        // High full terminal (120x45)
+        let mut s = state();
+        s.resize(120, 45);
+        s.update(crate::reader_state::ReaderAction::ToggleDiscreet);
+        let layout = AgentLayout::new(s.viewport, s.config.text_width);
+        assert_eq!(layout.header.height, 25);
+        let mut terminal = Terminal::new(TestBackend::new(120, 45)).unwrap();
+        terminal.draw(|f| draw(f, &s)).unwrap();
+        let screen = format!("{}", terminal.backend());
+
+        // Header has 25 lines full of realistic Agent trace steps
+        assert!(screen.contains("workspace: Reader-cli"));
+        assert!(screen.contains("inspect context"));
+        assert!(screen.contains("cargo clippy --workspace --all-targets -- -D warnings"));
+        assert!(screen.contains(r#"read_file path="src/discreet.rs""#));
+        assert!(screen.contains(r#"read_file path="src/reader_view.rs""#));
+        assert!(screen.contains(r#"read_file path="src/pagination.rs""#));
+        assert!(screen.contains(r#"read_file path="src/book.rs""#));
+        assert!(screen.contains("Read(local chunk)"));
+        assert!(screen.contains("Loaded source range"));
+        assert!(screen.contains("Context updated · Waiting for continuation"));
+
+        // High compact terminal (60x40) with custom agent lines = 18
+        s.resize(60, 40);
+        s.update(crate::reader_state::ReaderAction::SetAgentLines(Some(18)));
+        let compact_layout =
+            AgentLayout::with_options(s.viewport, s.config.text_width, s.config.agent_lines);
+        assert_eq!(compact_layout.header.height, 18);
+        let mut terminal_compact = Terminal::new(TestBackend::new(60, 40)).unwrap();
+        terminal_compact.draw(|f| draw(f, &s)).unwrap();
+        let compact_screen = format!("{}", terminal_compact.backend());
+        assert!(compact_screen.contains("inspect context"));
+        assert!(compact_screen.contains(r#"read_file path="src/discreet.rs""#));
+        assert!(compact_screen.contains(r#"read_file path="src/reader_view.rs""#));
+        assert!(compact_screen.contains("Read(local chunk)"));
+        assert!(compact_screen.contains("Loaded source range"));
     }
 
     #[test]

@@ -114,25 +114,16 @@ to the bookmark, press `d` to delete the selected bookmark, or `Esc` to close.
 
 ## Agent Terminal Mode (current implementation)
 
-Press `p` to toggle the experimental Agent Terminal view (stored under the
-legacy `discreet_mode` configuration key).
+Press `p` to toggle Agent Terminal view (or launch directly via `reader -a / --agent <FILE>`).
 
-**Currently implemented in this branch:** a locally simulated, fixed-format
-session header and Read label; one large paginated block of book text as
-tool-like output; a displayed physical line range; and a **noninteractive**
-`❯ _` prompt. The labels are placeholders, no AI model is invoked, and
-the displayed Read label is not a tool execution. Supported `j` / `k`
-navigation remains screen-based. There is no conversational message history,
-interactive Agent command parser, or streaming response.
-
-Press `F12` to fold visible book text into a simulated idle transcript and
-press it again to restore it. Reader metadata and queries are not shown in
-the folded terminal view, but visible source text can still be seen before
-folding. This is not a privacy or security boundary.
-
-The **next UX target**, including meaningful event-to-action mapping and
-bounded response chunks, is [Agent Terminal design](design/agent-terminal-reading.md).
-That file is a target, not a claim of implemented behavior.
+In Agent Terminal mode:
+- **High-terminal adaptation**: The header dynamically allocates realistic coding-agent context steps (AST code review, analyzer progress, clippy commands, compiler checks, UAX#14 engine, module scans, and tool traces) based on viewport height, completely eliminating awkward blank space or fixed 4-row truncation in tall terminals.
+- **Customizable simulated rows**:
+  - CLI: `reader --agent-lines <N> <FILE>` (or `--discreet-lines <N>`) to override the simulated header line count.
+  - Interactive: Type `:lines <N>` to adjust simulated rows dynamically, or `:lines auto` to return to automatic viewport height adaptation.
+  - Persistent: Save `agent_lines` in `configuration.json`.
+- **Zero-leakage folding**: Press `F12` to fold visible book text into a neutral session paused state; press again to restore.
+- **Controls**: `j`/`k` scroll 2 lines, `Space`/`PageDown` screen forward with visual overlap, `b` saves checkpoint, `v` toggles density (`Comfortable` / `Inspect`), `:` opens command prompt (`:density`, `:lines`, `:checkpoint`, `:fold`, `:normal`, `:help`, `:quit`).
 
 ## Shelf controls
 

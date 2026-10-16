@@ -13,6 +13,14 @@ pub struct Cli {
     #[arg(value_name = "FILE", num_args = 1.., trailing_var_arg = true)]
     pub file: Vec<String>,
 
+    /// Launch directly in Agent Terminal mode (coding-agent simulation).
+    #[arg(short = 'a', long = "agent", visible_alias = "discreet", global = true)]
+    pub agent: bool,
+
+    /// Number of simulated agent session rows to render in Agent Terminal mode.
+    #[arg(long = "agent-lines", visible_alias = "discreet-lines", global = true)]
+    pub agent_lines: Option<u16>,
+
     #[command(subcommand)]
     pub command: Option<Command>,
 }
@@ -129,7 +137,29 @@ mod tests {
     fn parses_direct_file_open() {
         let cli = Cli::parse_from(["reader", "book.txt"]);
         assert_eq!(cli.file_path(), Some(PathBuf::from("book.txt")));
+        assert!(!cli.agent);
         assert!(cli.command.is_none());
+    }
+
+    #[test]
+    fn parses_agent_flag() {
+        let cli1 = Cli::parse_from(["reader", "--agent", "book.txt"]);
+        assert_eq!(cli1.file_path(), Some(PathBuf::from("book.txt")));
+        assert!(cli1.agent);
+
+        let cli2 = Cli::parse_from(["reader", "-a", "book.txt"]);
+        assert_eq!(cli2.file_path(), Some(PathBuf::from("book.txt")));
+        assert!(cli2.agent);
+
+        let cli3 = Cli::parse_from(["reader", "--discreet", "book.txt"]);
+        assert_eq!(cli3.file_path(), Some(PathBuf::from("book.txt")));
+        assert!(cli3.agent);
+
+        let cli4 = Cli::parse_from(["reader", "-a", "--agent-lines", "15", "book.txt"]);
+        assert_eq!(cli4.agent_lines, Some(15));
+
+        let cli5 = Cli::parse_from(["reader", "--discreet-lines", "8", "book.txt"]);
+        assert_eq!(cli5.agent_lines, Some(8));
     }
 
     #[test]

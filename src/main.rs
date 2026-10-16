@@ -27,6 +27,12 @@ fn main() -> ExitCode {
 fn run() -> Result<()> {
     let cli = Cli::parse();
     let mut config = ReaderConfig::open_default()?;
+    if cli.agent {
+        config.discreet_mode = true;
+    }
+    if let Some(lines) = cli.agent_lines {
+        config.agent_lines = Some(lines);
+    }
     if let Some(Command::Network {
         command: Some(command),
     }) = cli.command.as_ref()
@@ -172,11 +178,20 @@ fn run() -> Result<()> {
             }
         }
         None => {
-            let file = cli
-                .file_path()
-                .with_context(|| "Pass a book path or use a subcommand. Try `reader --help`.")?;
-            let entry = import_book_from_cli(&mut store, &config, file)?;
-            open_book_in_reader(entry, &mut store, &mut config)?;
+            if let Some(file) = cli.file_path() {
+                let entry = import_book_from_cli(&mut store, &config, file)?;
+                open_book_in_reader(entry, &mut store, &mut config)?;
+            } else if cli.agent {
+                let entry = store
+                    .last_book()?
+                    .with_context(|| {
+                        "No recent book found. Pass a book path with `reader --agent <FILE>`."
+                    })?
+                    .clone();
+                open_book_in_reader(entry, &mut store, &mut config)?;
+            } else {
+                bail!("Pass a book path or use a subcommand. Try `reader --help`.");
+            }
         }
     }
 

@@ -95,6 +95,14 @@ pub(crate) struct AgentLayout {
 
 impl AgentLayout {
     pub fn new(area: Rect, configured_width: Option<u16>) -> Self {
+        Self::with_options(area, configured_width, None)
+    }
+
+    pub fn with_options(
+        area: Rect,
+        configured_width: Option<u16>,
+        custom_agent_lines: Option<u16>,
+    ) -> Self {
         if area.height < 6 {
             return Self {
                 mode: AgentViewMode::Compact,
@@ -111,23 +119,48 @@ impl AgentLayout {
             AgentViewMode::Compact
         };
 
-        // 60:40 Rule: Visible prose is capped at <= 40% of viewport height.
-        let max_text = match area.height {
-            0..=12 => 3,
-            13..=19 => 5,
-            20..=25 => 7,
-            26..=32 => 9,
-            _ => 12,
-        };
-        let body_height = (max_text + 2).min(area.height.saturating_sub(4));
         let foot_h = if is_full {
             3
+        } else if area.height >= 14 {
+            2
         } else {
-            2.min(area.height.saturating_sub(body_height))
+            1
         };
-        let remaining = area.height.saturating_sub(body_height + foot_h);
-        let banner_h = if is_full { 3.min(remaining) } else { 0 };
-        let head_h = remaining.saturating_sub(banner_h);
+
+        let (banner_h, head_h, body_height) = if let Some(lines) = custom_agent_lines {
+            // User explicitly customized the simulated agent rows.
+            let banner_h = if is_full && area.height >= 14 {
+                3.min(area.height.saturating_sub(foot_h + 3))
+            } else {
+                0
+            };
+            let max_possible_head = area.height.saturating_sub(banner_h + foot_h + 3);
+            let head_h = lines.min(max_possible_head).max(1);
+            let body_h = area
+                .height
+                .saturating_sub(banner_h + head_h + foot_h)
+                .max(3);
+            (banner_h, head_h, body_h)
+        } else {
+            // 60:40 Rule: Visible prose is capped at <= 40% of viewport height.
+            let max_text = match area.height {
+                0..=12 => 3,
+                13..=19 => 5,
+                20..=25 => 7,
+                26..=32 => 9,
+                _ => 12,
+            };
+            let body_height = (max_text + 2).min(area.height.saturating_sub(4));
+            let foot_h = if is_full {
+                3
+            } else {
+                2.min(area.height.saturating_sub(body_height))
+            };
+            let remaining = area.height.saturating_sub(body_height + foot_h);
+            let banner_h = if is_full { 3.min(remaining) } else { 0 };
+            let head_h = remaining.saturating_sub(banner_h);
+            (banner_h, head_h, body_height)
+        };
 
         let indent = if area.width < 50 { 2 } else { 4 };
         let available = area.width.saturating_sub(indent + 2);
@@ -295,5 +328,26 @@ mod tests {
                 }
             }
         }
+    }
+
+    #[test]
+    fn layout_with_custom_agent_lines_and_high_terminal() {
+        // High terminal: 120x45, default dynamic calculation allocates 25 rows for header
+        let default_high = AgentLayout::new(Rect::new(0, 0, 120, 45), None);
+        assert_eq!(default_high.header.height, 25);
+        assert_eq!(default_high.banner.height, 3);
+        assert_eq!(default_high.footer.height, 3);
+        assert_eq!(default_high.body.height, 14);
+
+        // Custom agent lines: request 18 rows
+        let custom_18 = AgentLayout::with_options(Rect::new(0, 0, 120, 45), None, Some(18));
+        assert_eq!(custom_18.header.height, 18);
+        assert_eq!(custom_18.body.height, 21);
+
+        // Custom agent lines on compact high terminal: 60x40
+        let compact_high = AgentLayout::with_options(Rect::new(0, 0, 60, 40), None, Some(20));
+        assert_eq!(compact_high.header.height, 20);
+        assert_eq!(compact_high.footer.height, 2);
+        assert_eq!(compact_high.body.height, 18);
     }
 }
