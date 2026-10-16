@@ -886,32 +886,54 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
     )]);
 
     let header_lines = if layout.mode == AgentViewMode::Full {
-        if layout.header.height >= 6 {
-            vec![
-                inspect_line,
-                Line::from(vec![
-                    Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
-                    Span::styled("Context initialized", palette.body()),
-                ]),
-                Line::styled("  source: local text corpus", palette.muted()),
-                Line::styled("  chunking: paragraph-aware", palette.muted()),
-                tool_call_line,
-                tool_res_line,
-            ]
-        } else {
-            vec![
-                inspect_line,
-                Line::from(vec![
-                    Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
-                    Span::styled(
-                        "Context initialized · source: local text corpus",
-                        palette.muted(),
+        let format_label = match state.document.format {
+            crate::book::BookFormat::Epub => "EPUB",
+            crate::book::BookFormat::Pdf => "PDF",
+            crate::book::BookFormat::Txt => "TXT",
+            crate::book::BookFormat::Mobi => "MOBI",
+        };
+        let section_count = state.document.sections.len();
+        let current_section = state.current_section() + 1;
+        let density_label = match state.agent.density {
+            AgentDensity::Comfortable => "comfortable",
+            AgentDensity::Inspect => "inspect",
+        };
+
+        let mut lines = vec![
+            inspect_line,
+            Line::from(vec![
+                Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+                Span::styled("Context initialized", palette.body()),
+            ]),
+            Line::styled("  source: local text corpus · workspace: Reader-cli", palette.muted()),
+            Line::styled("  mode: interactive · context: ready", palette.muted()),
+            Line::from(vec![
+                Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+                Span::styled(
+                    format!(
+                        "Inspect source structure · Format: {format_label} · Sections: {section_count} ({current_section})"
                     ),
-                ]),
-                tool_call_line,
-                tool_res_line,
-            ]
-        }
+                    palette.body(),
+                ),
+            ]),
+            Line::styled(
+                format!("  {} Encoding: UTF-8 · chunking: paragraph-aware", agent_symbol("⎿", "\\")),
+                palette.muted(),
+            ),
+            tool_call_line,
+            tool_res_line,
+            Line::from(vec![
+                Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+                Span::styled(
+                    format!(
+                        "Context updated · Waiting for continuation · density: {density_label}"
+                    ),
+                    palette.muted(),
+                ),
+            ]),
+        ];
+        lines.truncate(usize::from(layout.header.height));
+        lines
     } else {
         match layout.header.height {
             1 => vec![Line::from(vec![
@@ -921,7 +943,11 @@ fn draw_discreet(frame: &mut ratatui::Frame<'_>, state: &ReaderState, palette: P
                     palette.body(),
                 ),
             ])],
-            _ => vec![tool_call_line, tool_res_line],
+            _ => {
+                let mut lines = vec![tool_call_line, tool_res_line];
+                lines.truncate(usize::from(layout.header.height));
+                lines
+            }
         }
     };
     frame.render_widget(Paragraph::new(header_lines), layout.header);

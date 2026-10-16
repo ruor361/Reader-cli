@@ -1,4 +1,5 @@
 use std::path::{Path, PathBuf};
+use std::sync::mpsc::{self, Receiver};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use anyhow::{bail, Context, Result};
@@ -10,6 +11,7 @@ use unicode_width::UnicodeWidthStr;
 
 use crate::book::BookFormat;
 use crate::config::ReaderConfig;
+use crate::network::{DownloadedBook, NetworkClient, RemoteBook};
 use crate::storage::{LibraryBook, ScanDirResult, Store};
 use crate::ui::{
     action_line, centered_rect, command_for, fill_background, help_lines, hud_chunks, KeyBinding,
@@ -30,7 +32,7 @@ pub fn run_shelf(
     config: &mut ReaderConfig,
     scan_result: Option<ScanDirResult>,
 ) -> Result<ShelfOutcome> {
-    run_shelf_with_notice(store, config, scan_result, None)
+    run_shelf_unified(store, config, scan_result, None, None)
 }
 
 pub fn run_shelf_with_notice(
@@ -38,6 +40,16 @@ pub fn run_shelf_with_notice(
     config: &mut ReaderConfig,
     scan_result: Option<ScanDirResult>,
     notice: Option<String>,
+) -> Result<ShelfOutcome> {
+    run_shelf_unified(store, config, scan_result, notice, None)
+}
+
+pub fn run_shelf_unified(
+    store: &mut Store,
+    config: &mut ReaderConfig,
+    scan_result: Option<ScanDirResult>,
+    notice: Option<String>,
+    client: Option<NetworkClient>,
 ) -> Result<ShelfOutcome> {
     let mut terminal = ratatui::init();
     let _guard = TerminalGuard;
@@ -48,10 +60,17 @@ pub fn run_shelf_with_notice(
     if let Some(notice) = notice {
         app.message = notice;
     }
+    if let Some(client) = client {
+        app.network_client = Some(client);
+        app.sync_network();
+    }
 
     let outcome = loop {
+        if let Some(outcome) = app.poll(store, config) {
+            break outcome;
+        }
         terminal.draw(|frame| draw(frame, &app, store, config))?;
-        if !event::poll(std::time::Duration::from_millis(200))? {
+        if !event::poll(std::time::Duration::from_millis(50))? {
             continue;
         }
         match event::read()? {
@@ -84,6 +103,24 @@ enum ShelfSort {
     Progress,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShelfFilter {
+    #[default]
+    All,
+    Local,
+    Remote,
+}
+
+impl ShelfFilter {
+    pub fn label(self) -> &'static str {
+        match self {
+            ShelfFilter::All => "all",
+            ShelfFilter::Local => "local",
+            ShelfFilter::Remote => "cloud",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum ShelfMode {
     Browse,
@@ -93,6 +130,12 @@ enum ShelfMode {
     ConfirmDelete,
     ConfirmDeleteFile,
     Help,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum BookSource {
+    Local,
+    Remote(RemoteBook),
 }
 
 #[derive(Debug, Clone)]
@@ -107,6 +150,7 @@ struct ShelfRow {
     missing: bool,
     #[allow(dead_code)]
     path: PathBuf,
+    source: BookSource,
 }
 
 struct ShelfApp {
@@ -119,6 +163,32 @@ struct ShelfApp {
     viewport: Rect,
     message: String,
     pending_delete_file: Option<PathBuf>,
+    filter: ShelfFilter,
+    network_client: Option<NetworkClient>,
+    pending_network: Option<Receiver<Result<Vec<RemoteBook>>>>,
+    pending_download: Option<Receiver<Result<DownloadedBook>>>,
+    is_syncing_network: bool,
+}
+
+impl Default for ShelfApp {
+    fn default() -> Self {
+        Self {
+            books: Vec::new(),
+            visible: Vec::new(),
+            selection: 0,
+            sort: ShelfSort::Recent,
+            query: String::new(),
+            mode: ShelfMode::Browse,
+            viewport: Rect::default(),
+            message: String::new(),
+            pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
+        }
+    }
 }
 
 impl ShelfApp {
@@ -133,6 +203,11 @@ impl ShelfApp {
             viewport,
             message: String::new(),
             pending_delete_file: None,
+            filter: ShelfFilter::All,
+            network_client: None,
+            pending_network: None,
+            pending_download: None,
+            is_syncing_network: false,
         };
         app.refresh_from_store(store);
         if let Some(result) = scan_result {
@@ -160,9 +235,119 @@ impl ShelfApp {
                 bookmark_count: book.bookmarks.len(),
                 missing: book.missing,
                 path: book.path.clone(),
+                source: BookSource::Local,
             })
             .collect();
         self.recompute_visible();
+    }
+
+    fn merge_remote_books(&mut self, remote_books: Vec<RemoteBook>, store: &Store) {
+        self.refresh_from_store(store);
+        let local_books = store.library().books();
+        for remote in remote_books {
+            let already_local = local_books.iter().any(|b| {
+                let same_title = b.title.trim().eq_ignore_ascii_case(remote.title.trim());
+                let same_author = match (&b.author, &remote.author) {
+                    (Some(a1), Some(a2)) => a1.trim().eq_ignore_ascii_case(a2.trim()),
+                    (None, None) => true,
+                    _ => false,
+                };
+                same_title && same_author
+            });
+            if !already_local {
+                self.books.push(ShelfRow {
+                    id: remote.id.clone(),
+                    title: remote.title.clone(),
+                    author: remote.author.clone(),
+                    format: remote.format.unwrap_or(BookFormat::Epub),
+                    progress_tenths: 0,
+                    last_opened: None,
+                    bookmark_count: 0,
+                    missing: false,
+                    path: PathBuf::new(),
+                    source: BookSource::Remote(remote),
+                });
+            }
+        }
+        self.recompute_visible();
+    }
+
+    fn cycle_filter(&mut self) {
+        self.filter = match self.filter {
+            ShelfFilter::All => ShelfFilter::Local,
+            ShelfFilter::Local => ShelfFilter::Remote,
+            ShelfFilter::Remote => ShelfFilter::All,
+        };
+        self.recompute_visible();
+        self.message = format!("View: {}", self.filter.label());
+    }
+
+    fn sync_network(&mut self) {
+        if let Some(client) = &self.network_client {
+            let client = client.clone();
+            let (tx, rx) = mpsc::channel();
+            self.pending_network = Some(rx);
+            self.is_syncing_network = true;
+            std::thread::spawn(move || {
+                let _ = tx.send(client.books());
+            });
+        }
+    }
+
+    fn start_download(&mut self, client: NetworkClient, remote: RemoteBook) {
+        let title = remote.title.clone();
+        let (tx, rx) = mpsc::channel();
+        self.pending_download = Some(rx);
+        self.message = format!("Downloading {title}...");
+        std::thread::spawn(move || {
+            let _ = tx.send(client.download(&remote));
+        });
+    }
+
+    fn poll(&mut self, store: &mut Store, config: &ReaderConfig) -> Option<ShelfOutcome> {
+        if let Some(rx) = self.pending_download.as_ref() {
+            match rx.try_recv() {
+                Ok(Ok(download)) => {
+                    self.pending_download = None;
+                    match crate::network::import_download(store, config, &download) {
+                        Ok(book) => return Some(ShelfOutcome::Open(book)),
+                        Err(err) => self.message = format!("Import failed: {err:#}"),
+                    }
+                }
+                Ok(Err(err)) => {
+                    self.pending_download = None;
+                    self.message = format!("Download failed: {err:#}");
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending_download = None;
+                    self.message = "Download interrupted".into();
+                }
+            }
+        }
+
+        if let Some(rx) = self.pending_network.as_ref() {
+            match rx.try_recv() {
+                Ok(Ok(remote_books)) => {
+                    self.pending_network = None;
+                    self.is_syncing_network = false;
+                    let count = remote_books.len();
+                    self.merge_remote_books(remote_books, store);
+                    self.message = format!("Synced {count} network books");
+                }
+                Ok(Err(err)) => {
+                    self.pending_network = None;
+                    self.is_syncing_network = false;
+                    self.message = format!("Network sync failed: {err:#}");
+                }
+                Err(mpsc::TryRecvError::Empty) => {}
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    self.pending_network = None;
+                    self.is_syncing_network = false;
+                }
+            }
+        }
+        None
     }
 
     fn recompute_visible(&mut self) {
@@ -171,6 +356,11 @@ impl ShelfApp {
             .books
             .iter()
             .enumerate()
+            .filter(|(_, book)| match self.filter {
+                ShelfFilter::All => true,
+                ShelfFilter::Local => matches!(book.source, BookSource::Local),
+                ShelfFilter::Remote => matches!(book.source, BookSource::Remote(_)),
+            })
             .filter(|(_, book)| {
                 if needle.is_empty() {
                     return true;
@@ -284,6 +474,7 @@ enum ShelfCommandUi {
     Help,
     Quit,
     Network,
+    SyncNetwork,
 }
 
 const OPEN_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Enter)];
@@ -320,10 +511,20 @@ const SHELF_BINDINGS: &[KeyBinding<ShelfCommandUi>] = &[
         chords: &[KeyChord::plain(KeyCode::Char('w'))],
         keys: "w",
         hud_keys: "w",
-        label: "Network bookshelf",
-        short_label: "Network",
+        label: "Filter network / local",
+        short_label: "View",
         show_in_hud: true,
         hud_priority: 0,
+    },
+    KeyBinding {
+        command: ShelfCommandUi::SyncNetwork,
+        chords: &[KeyChord::plain(KeyCode::Char('R'))],
+        keys: "R",
+        hud_keys: "R",
+        label: "Sync network bookshelf",
+        short_label: "Sync",
+        show_in_hud: true,
+        hud_priority: 1,
     },
     KeyBinding {
         command: ShelfCommandUi::Open,
