@@ -2,6 +2,7 @@
 /target/
 /target-*/
 /reader.exe
+/dist/
 **/*.rs.bk
 
 # IDE and editor-local files
