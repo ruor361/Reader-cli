@@ -1260,19 +1260,22 @@ fn draw_hidden(frame: &mut ratatui::Frame<'_>, palette: Palette) {
 
     let inspect_line = Line::from(vec![
         Span::styled(format!("{} ", agent_symbol("❯", ">")), palette.accent()),
-        Span::styled("inspect context", palette.body()),
+        Span::styled("cargo test --workspace --lib", palette.body()),
     ]);
     let tool_call_line = Line::from(vec![
         Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
-        Span::styled("Read(local chunk)", palette.body()),
+        Span::styled(
+            r#"run_command(command="cargo test --workspace --lib")"#,
+            palette.body(),
+        ),
     ]);
-    let tool_res_line = Line::from(vec![Span::styled(
+    let tool_res_line = Line::styled(
         format!(
-            "  {} Session paused · Output folded (F12 resume)",
+            "  {} Executing runner in isolated process · Output folded [38 passed]",
             agent_symbol("⎿", "\\")
         ),
         palette.muted(),
-    )]);
+    );
 
     let header_lines = if layout.mode == AgentViewMode::Full {
         vec![inspect_line, tool_call_line, tool_res_line]
@@ -1283,6 +1286,80 @@ fn draw_hidden(frame: &mut ratatui::Frame<'_>, palette: Palette) {
         }
     };
     frame.render_widget(Paragraph::new(header_lines), layout.header);
+
+    // Render simulated tool execution output into layout.body to replace the book text completely
+    let mut body_lines = Vec::new();
+    body_lines.push(Line::from(vec![
+        Span::styled(format!("{} ", agent_symbol("●", "*")), palette.accent()),
+        Span::styled(
+            r#"run_command command="cargo test --workspace --lib""#,
+            palette.body(),
+        ),
+    ]));
+    body_lines.push(Line::styled(
+        "   Compiling reader v0.1.0 (G:/Document/reader/Reader-cli)",
+        palette.muted(),
+    ));
+    body_lines.push(Line::styled("   Checking ratatui v0.29.0", palette.muted()));
+    body_lines.push(Line::styled(
+        "   Checking crossterm v0.28.1",
+        palette.muted(),
+    ));
+    body_lines.push(Line::styled(
+        "    Finished `test` profile [unoptimized + debuginfo] in 0.85s",
+        palette.muted(),
+    ));
+    body_lines.push(Line::styled(
+        "     Running unittests src/lib.rs (target/debug/deps/reader-d1838cf4023)",
+        palette.muted(),
+    ));
+    body_lines.push(Line::from(""));
+    body_lines.push(Line::styled("running 38 tests", palette.body()));
+
+    let test_cases = [
+        "test book::tests::test_load_epub ... ok",
+        "test storage::tests::test_deduplication ... ok",
+        "test pagination::tests::test_stable_anchors ... ok",
+        "test tui::tests::test_event_handling ... ok",
+        "test reader_view::tests::test_layout_bounds ... ok",
+        "test reader_input::tests::test_keybindings ... ok",
+        "test paths::tests::test_portable_paths ... ok",
+        "test atomic_file::tests::test_atomic_write ... ok",
+        "test discreet::tests::test_zero_leakage ... ok",
+        "test shelf::tests::test_reconciliation ... ok",
+        "test network::tests::test_bounded_downloads ... ok",
+        "test journal::tests::test_snapshot_recovery ... ok",
+        "test parser::tests::test_utf8_decoding ... ok",
+        "test render::tests::test_line_breaking ... ok",
+        "test search::tests::test_exact_matches ... ok",
+        "test session::tests::test_reading_recency ... ok",
+        "test format::tests::test_mobi_metadata ... ok",
+        "test config::tests::test_persistence ... ok",
+    ];
+
+    let target_height = usize::from(layout.body.height);
+    for tc in test_cases {
+        if body_lines.len() + 3 >= target_height {
+            break;
+        }
+        body_lines.push(Line::styled(format!("  {tc}"), palette.muted()));
+    }
+
+    if body_lines.len() + 2 <= target_height {
+        body_lines.push(Line::from(""));
+        body_lines.push(Line::styled(
+            "test result: ok. 38 passed; 0 failed; 0 ignored; 0 measured; 0 filtered out",
+            palette.accent(),
+        ));
+    }
+    if body_lines.len() < target_height {
+        body_lines.push(Line::styled(
+            "  [Tool execution completed successfully · exit code 0]",
+            palette.muted(),
+        ));
+    }
+    body_lines.truncate(target_height);
+    frame.render_widget(Paragraph::new(body_lines), layout.body);
 
     let prompt_spans = vec![
         Span::styled(format!("{} ", agent_symbol("❯", ">")), palette.muted()),
@@ -1298,14 +1375,14 @@ fn draw_hidden(frame: &mut ratatui::Frame<'_>, palette: Palette) {
             split_row_line(
                 vec![
                     Span::styled("activity: ", palette.muted()),
-                    Span::styled("session paused", palette.muted()),
+                    Span::styled("cargo-test ✓ · exit code 0", palette.accent()),
                 ],
-                vec![Span::styled("chunk folded", palette.muted())],
+                vec![Span::styled("38 passed · output folded", palette.muted())],
                 width,
             ),
             split_row_line(
                 prompt_spans,
-                vec![Span::styled("F12 resume", palette.muted())],
+                vec![Span::styled("ready", palette.muted())],
                 width,
             ),
         ]
@@ -1315,7 +1392,7 @@ fn draw_hidden(frame: &mut ratatui::Frame<'_>, palette: Palette) {
             1 => vec![Line::from(prompt_spans)],
             _ => vec![
                 Line::from(prompt_spans),
-                Line::styled("  F12 resume", palette.muted()),
+                Line::styled("  cargo-test ✓ · 38 passed", palette.muted()),
             ],
         }
     };
@@ -1701,7 +1778,11 @@ mod tests {
             assert!(!screen.contains("book.txt"));
             assert!(!screen.contains("TypeError"));
             if w > 30 {
-                assert!(screen.contains("tool output folded") || screen.contains("Session paused"));
+                assert!(
+                    screen.contains("output folded")
+                        || screen.contains("Output folded")
+                        || screen.contains("run_command")
+                );
             }
         }
     }

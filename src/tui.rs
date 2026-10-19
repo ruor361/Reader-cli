@@ -88,6 +88,8 @@ fn run_reader_with_data(
         &mut state,
     );
     let mut exit = false;
+    let (_hotkey_listener, hotkey_rx) = crate::hotkey::GlobalHotkeyListener::start_f12();
+    let mut last_f12_toggle = Instant::now() - Duration::from_secs(1);
 
     while !exit {
         apply_receipts(&writer, &mut state);
@@ -100,83 +102,112 @@ fn run_reader_with_data(
             enqueue(&writer, WriteCommand::Session(checkpoint), &mut state);
         }
         terminal.draw(|frame| crate::reader_view::draw(frame, &state))?;
-        if !event::poll(Duration::from_millis(50))? {
-            continue;
+
+        let mut global_f12 = false;
+        while let Ok(()) = hotkey_rx.try_recv() {
+            global_f12 = true;
         }
-        match event::read()? {
-            Event::Key(key) if should_handle_key_event(key) => {
-                let action = action_for_key(key, &state);
-                let was_hidden = state.hidden;
-                let previous_position = state.position;
-                let effects = state.update(action);
-                // Also catches :fold, not just the physical F12 key. No disk
-                // work, session finalization or notification precedes this frame.
-                if state.hidden && !was_hidden {
-                    terminal.clear()?;
-                    terminal.draw(|frame| crate::reader_view::draw(frame, &state))?;
-                }
-                let wall = time::OffsetDateTime::now_utc();
-                let now = Instant::now();
-                let checkpoint = if state.hidden && !was_hidden {
-                    session.finish(state.position, wall, now)
-                } else if !state.hidden && (was_hidden || !matches!(action, ReaderAction::None)) {
-                    session.on_activity(previous_position, wall, now)
-                } else {
-                    None
-                };
-                if let Some(checkpoint) = checkpoint {
-                    enqueue(&writer, WriteCommand::Session(checkpoint), &mut state);
-                }
-                for effect in effects {
-                    match effect {
-                        ReaderEffect::SaveProgress(progress) => {
-                            enqueue(&writer, WriteCommand::Progress(progress), &mut state);
+
+        let mut action = if global_f12 {
+            if now.duration_since(last_f12_toggle) >= Duration::from_millis(250) {
+                last_f12_toggle = now;
+                Some(ReaderAction::ToggleHidden)
+            } else {
+                None
+            }
+        } else {
+            None
+        };
+
+        if action.is_none() && event::poll(Duration::from_millis(50))? {
+            match event::read()? {
+                Event::Key(key) if should_handle_key_event(key) => {
+                    let key_action = action_for_key(key, &state);
+                    if matches!(key_action, ReaderAction::ToggleHidden) {
+                        if now.duration_since(last_f12_toggle) >= Duration::from_millis(250) {
+                            last_f12_toggle = now;
+                            action = Some(ReaderAction::ToggleHidden);
                         }
-                        ReaderEffect::SaveConfig => {
-                            enqueue(
-                                &writer,
-                                WriteCommand::Config(state.config.clone()),
-                                &mut state,
+                    } else if !matches!(key_action, ReaderAction::None) {
+                        action = Some(key_action);
+                    }
+                }
+                Event::Resize(width, height) => {
+                    state.resize(width, height);
+                    if state.hidden {
+                        terminal.clear()?;
+                    }
+                }
+                _ => {}
+            }
+        }
+
+        let Some(action) = action else {
+            continue;
+        };
+
+        let was_hidden = state.hidden;
+        let previous_position = state.position;
+        let effects = state.update(action);
+        // Also catches :fold, not just the physical F12 key. No disk
+        // work, session finalization or notification precedes this frame.
+        if state.hidden && !was_hidden {
+            terminal.clear()?;
+            terminal.draw(|frame| crate::reader_view::draw(frame, &state))?;
+        }
+        let wall = time::OffsetDateTime::now_utc();
+        let now = Instant::now();
+        let checkpoint = if state.hidden && !was_hidden {
+            session.finish(state.position, wall, now)
+        } else if !state.hidden && (was_hidden || !matches!(action, ReaderAction::None)) {
+            session.on_activity(previous_position, wall, now)
+        } else {
+            None
+        };
+        if let Some(checkpoint) = checkpoint {
+            enqueue(&writer, WriteCommand::Session(checkpoint), &mut state);
+        }
+        for effect in effects {
+            match effect {
+                ReaderEffect::SaveProgress(progress) => {
+                    enqueue(&writer, WriteCommand::Progress(progress), &mut state);
+                }
+                ReaderEffect::SaveConfig => {
+                    enqueue(
+                        &writer,
+                        WriteCommand::Config(state.config.clone()),
+                        &mut state,
+                    );
+                }
+                ReaderEffect::AddBookmark { label, progress } => {
+                    state.agent.receipt = Some("Checkpoint saving");
+                    enqueue(&writer, WriteCommand::Add { label, progress }, &mut state);
+                }
+                ReaderEffect::DeleteBookmark { id, removed, index } => {
+                    if !writer.enqueue(WriteCommand::Delete(id)) {
+                        let insert_at = index.min(state.bookmarks.len());
+                        state.bookmarks.insert(insert_at, removed);
+                        if let Overlay::Bookmarks(navigator) = &mut state.overlay {
+                            navigator.selection = insert_at;
+                        }
+                        state.agent.receipt = Some("Save queue busy; retry the command");
+                        if !state.hidden && !state.config.discreet_mode {
+                            state.notify(
+                                "Save queue busy; retry the command",
+                                NotificationKind::Error,
                             );
                         }
-                        ReaderEffect::AddBookmark { label, progress } => {
-                            state.agent.receipt = Some("Checkpoint saving");
-                            enqueue(&writer, WriteCommand::Add { label, progress }, &mut state);
-                        }
-                        ReaderEffect::DeleteBookmark { id, removed, index } => {
-                            if !writer.enqueue(WriteCommand::Delete(id)) {
-                                let insert_at = index.min(state.bookmarks.len());
-                                state.bookmarks.insert(insert_at, removed);
-                                if let Overlay::Bookmarks(navigator) = &mut state.overlay {
-                                    navigator.selection = insert_at;
-                                }
-                                state.agent.receipt = Some("Save queue busy; retry the command");
-                                if !state.hidden && !state.config.discreet_mode {
-                                    state.notify(
-                                        "Save queue busy; retry the command",
-                                        NotificationKind::Error,
-                                    );
-                                }
-                            }
-                        }
-                        ReaderEffect::Exit => {
-                            exit = true;
-                        }
                     }
                 }
-                if !state.hidden && state.position != previous_position {
-                    if let Some(checkpoint) = session.checkpoint(state.position, wall, now, true) {
-                        enqueue(&writer, WriteCommand::Session(checkpoint), &mut state);
-                    }
+                ReaderEffect::Exit => {
+                    exit = true;
                 }
             }
-            Event::Resize(width, height) => {
-                state.resize(width, height);
-                if state.hidden {
-                    terminal.clear()?;
-                }
+        }
+        if !state.hidden && state.position != previous_position {
+            if let Some(checkpoint) = session.checkpoint(state.position, wall, now, true) {
+                enqueue(&writer, WriteCommand::Session(checkpoint), &mut state);
             }
-            _ => {}
         }
     }
     if let Some(checkpoint) = session.finish(
