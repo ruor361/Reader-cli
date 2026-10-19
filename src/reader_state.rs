@@ -128,6 +128,9 @@ pub(crate) enum ReaderAction {
     CompleteCommand,
     ToggleDensity,
     SetAgentLines(Option<u16>),
+    CycleTheme,
+    #[allow(dead_code)]
+    SetReadingTheme(crate::ui::ReadingTheme),
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -499,6 +502,16 @@ impl ReaderState {
                 self.config.text_width = None;
                 self.repaginate();
                 self.notify("Text width: auto", NotificationKind::Info);
+                vec![ReaderEffect::SaveConfig]
+            }
+            ReaderAction::CycleTheme => {
+                let theme = self.config.cycle_reading_theme();
+                self.notify(format!("Theme: {}", theme.label()), NotificationKind::Info);
+                vec![ReaderEffect::SaveConfig]
+            }
+            ReaderAction::SetReadingTheme(theme) => {
+                self.config.set_reading_theme(theme);
+                self.notify(format!("Theme: {}", theme.label()), NotificationKind::Info);
                 vec![ReaderEffect::SaveConfig]
             }
             ReaderAction::AddBookmark => vec![ReaderEffect::AddBookmark {
@@ -1109,6 +1122,8 @@ fn action_is_available_in_discreet(action: ReaderAction) -> bool {
             | ReaderAction::TogglePageOverlap
             | ReaderAction::ToggleDensity
             | ReaderAction::SetAgentLines(_)
+            | ReaderAction::CycleTheme
+            | ReaderAction::SetReadingTheme(_)
     )
 }
 
@@ -1762,5 +1777,35 @@ mod tests {
         assert_eq!(effects_back, vec![ReaderEffect::SaveConfig]);
         assert!(state.config.page_overlap);
         assert_eq!(state.position, pos);
+    }
+
+    #[test]
+    fn reading_theme_cycle_and_set_updates_config_and_notifies() {
+        let mut state = state();
+        assert_eq!(
+            state.config.reading_theme,
+            crate::ui::ReadingTheme::Terminal
+        );
+
+        let effects = state.update(ReaderAction::CycleTheme);
+        assert_eq!(effects, vec![ReaderEffect::SaveConfig]);
+        assert_eq!(state.config.reading_theme, crate::ui::ReadingTheme::Sepia);
+        assert!(state
+            .notification
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("Warm Sepia"));
+
+        let effects_set =
+            state.update(ReaderAction::SetReadingTheme(crate::ui::ReadingTheme::Nord));
+        assert_eq!(effects_set, vec![ReaderEffect::SaveConfig]);
+        assert_eq!(state.config.reading_theme, crate::ui::ReadingTheme::Nord);
+        assert!(state
+            .notification
+            .as_ref()
+            .unwrap()
+            .text
+            .contains("Nord Dark"));
     }
 }

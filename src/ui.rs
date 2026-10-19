@@ -5,6 +5,36 @@ use ratatui::text::{Line, Span};
 use ratatui::widgets::Block;
 use unicode_width::UnicodeWidthStr;
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Serialize, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ReadingTheme {
+    #[default]
+    Terminal,
+    Sepia,
+    Eink,
+    Nord,
+}
+
+impl ReadingTheme {
+    pub fn next(self) -> Self {
+        match self {
+            Self::Terminal => Self::Sepia,
+            Self::Sepia => Self::Eink,
+            Self::Eink => Self::Nord,
+            Self::Nord => Self::Terminal,
+        }
+    }
+
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Terminal => "Terminal Default",
+            Self::Sepia => "Warm Sepia (羊皮纸)",
+            Self::Eink => "Paper E-ink (墨水屏)",
+            Self::Nord => "Nord Dark (极光夜)",
+        }
+    }
+}
+
 #[derive(Debug, Clone, Copy)]
 pub struct Palette {
     pub background: Color,
@@ -36,6 +66,66 @@ impl Palette {
             border: Color::DarkGray,
             error: Color::Red,
             success: Color::Green,
+        }
+    }
+
+    pub const fn sepia() -> Self {
+        Self {
+            background: Color::Rgb(30, 28, 25),
+            body: Color::Rgb(232, 220, 190),
+            muted: Color::Rgb(140, 130, 115),
+            accent: Color::Rgb(215, 155, 90),
+            discreet_body: Color::Rgb(232, 220, 190),
+            discreet_muted: Color::Rgb(140, 130, 115),
+            discreet_auxiliary: Color::Rgb(215, 155, 90),
+            selected_foreground: Color::Rgb(30, 28, 25),
+            selected_background: Color::Rgb(232, 220, 190),
+            border: Color::Rgb(70, 65, 55),
+            error: Color::Rgb(230, 95, 80),
+            success: Color::Rgb(140, 180, 100),
+        }
+    }
+
+    pub const fn eink() -> Self {
+        Self {
+            background: Color::Rgb(24, 24, 24),
+            body: Color::Rgb(210, 210, 210),
+            muted: Color::Rgb(110, 110, 110),
+            accent: Color::Rgb(240, 240, 240),
+            discreet_body: Color::Rgb(210, 210, 210),
+            discreet_muted: Color::Rgb(110, 110, 110),
+            discreet_auxiliary: Color::Rgb(180, 180, 180),
+            selected_foreground: Color::Rgb(24, 24, 24),
+            selected_background: Color::Rgb(210, 210, 210),
+            border: Color::Rgb(60, 60, 60),
+            error: Color::Rgb(220, 80, 80),
+            success: Color::Rgb(160, 160, 160),
+        }
+    }
+
+    pub const fn nord() -> Self {
+        Self {
+            background: Color::Rgb(46, 52, 64),
+            body: Color::Rgb(236, 239, 244),
+            muted: Color::Rgb(129, 161, 193),
+            accent: Color::Rgb(136, 192, 208),
+            discreet_body: Color::Rgb(236, 239, 244),
+            discreet_muted: Color::Rgb(129, 161, 193),
+            discreet_auxiliary: Color::Rgb(136, 192, 208),
+            selected_foreground: Color::Rgb(46, 52, 64),
+            selected_background: Color::Rgb(236, 239, 244),
+            border: Color::Rgb(76, 86, 106),
+            error: Color::Rgb(191, 97, 106),
+            success: Color::Rgb(163, 190, 140),
+        }
+    }
+
+    pub fn for_reading_theme(theme: ReadingTheme) -> Self {
+        match theme {
+            ReadingTheme::Terminal => Self::terminal(),
+            ReadingTheme::Sepia => Self::sepia(),
+            ReadingTheme::Eink => Self::eink(),
+            ReadingTheme::Nord => Self::nord(),
         }
     }
 

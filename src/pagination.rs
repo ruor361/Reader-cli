@@ -149,11 +149,14 @@ pub(crate) fn paginate_discreet(
     )
 }
 
+/// 纯粹阅读模式在宽屏下的默认舒适黄金行宽（约 38~39 个汉字）
+pub const DEFAULT_COMFORT_WIDTH: usize = 78;
+
 pub fn resolved_content_width(width: u16, text_width: Option<u16>) -> usize {
     let available = usize::from(width.saturating_sub(2).max(1));
     text_width
         .map(|value| usize::from(value.max(20)))
-        .unwrap_or(available)
+        .unwrap_or_else(|| available.min(DEFAULT_COMFORT_WIDTH))
         .min(available)
 }
 

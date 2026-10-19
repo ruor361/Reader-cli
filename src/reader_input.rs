@@ -32,6 +32,7 @@ pub(crate) enum ReadingCommand {
     ScrollDown,
     Commands,
     ToggleDensity,
+    CycleTheme,
 }
 
 const PREVIOUS_KEYS: &[KeyChord] = &[
@@ -72,6 +73,7 @@ const INCREASE_WIDTH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char(']'))];
 const RESET_WIDTH_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('\\'))];
 const IMMERSIVE_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('i'))];
 const OVERLAP_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('o'))];
+const THEME_KEYS: &[KeyChord] = &[KeyChord::plain(KeyCode::Char('C'))];
 
 pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
     KeyBinding {
@@ -304,6 +306,16 @@ pub(crate) const READING_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
         show_in_hud: false,
         hud_priority: 2,
     },
+    KeyBinding {
+        command: ReadingCommand::CycleTheme,
+        chords: THEME_KEYS,
+        keys: "C",
+        hud_keys: "C",
+        label: "Cycle reading theme (Sepia/E-ink/Nord/Terminal)",
+        short_label: "Theme",
+        show_in_hud: true,
+        hud_priority: 1,
+    },
 ];
 
 pub(crate) const DISCREET_BINDINGS: &[KeyBinding<ReadingCommand>] = &[
@@ -498,6 +510,7 @@ pub(crate) const LOCAL_COMMANDS: &[(&str, ReaderAction)] = &[
     ("lines", ReaderAction::SetAgentLines(None)),
     ("fold", ReaderAction::ToggleHidden),
     ("normal", ReaderAction::ToggleDiscreet),
+    ("theme", ReaderAction::CycleTheme),
     ("help", ReaderAction::OpenHelp),
     ("quit", ReaderAction::Exit),
 ];
@@ -611,6 +624,7 @@ fn command_action(command: ReadingCommand) -> ReaderAction {
         ReadingCommand::ToggleImmersive => ReaderAction::ToggleImmersive,
         ReadingCommand::TogglePageOverlap => ReaderAction::TogglePageOverlap,
         ReadingCommand::ToggleDensity => ReaderAction::ToggleDensity,
+        ReadingCommand::CycleTheme => ReaderAction::CycleTheme,
     }
 }
 
@@ -735,6 +749,17 @@ mod tests {
                 &state()
             ),
             ReaderAction::None
+        );
+    }
+
+    #[test]
+    fn shift_c_cycles_reading_theme() {
+        assert_eq!(
+            action_for_key(
+                KeyEvent::new(KeyCode::Char('C'), KeyModifiers::NONE),
+                &state()
+            ),
+            ReaderAction::CycleTheme
         );
     }
 

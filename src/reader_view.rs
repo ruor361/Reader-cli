@@ -9,10 +9,14 @@ use crate::reader_input::{DISCREET_BINDINGS, LOCAL_COMMANDS, READING_BINDINGS};
 use crate::reader_state::{
     format_tenths, ContentsNavigator, NotificationKind, Overlay, ReaderState,
 };
-use crate::ui::{action_line, centered_rect, fill_background, help_lines, hud_chunks, Palette};
+use crate::ui::{centered_rect, fill_background, help_lines, hud_chunks, Palette};
 
 pub(crate) fn draw(frame: &mut ratatui::Frame<'_>, state: &ReaderState) {
-    let palette = Palette::terminal();
+    let palette = if state.config.discreet_mode {
+        Palette::terminal().discreet_mode()
+    } else {
+        Palette::for_reading_theme(state.config.reading_theme)
+    };
     fill_background(frame, palette);
     if state.hidden {
         draw_hidden(frame, palette);
@@ -28,7 +32,9 @@ pub(crate) fn draw(frame: &mut ratatui::Frame<'_>, state: &ReaderState) {
     } else {
         let [status_area, body_area, action_area] = hud_chunks(frame.area());
         frame.render_widget(
-            Paragraph::new(status_line(state, palette)).style(palette.base()),
+            Paragraph::new(status_line(state, palette))
+                .style(palette.base())
+                .alignment(Alignment::Center),
             status_area,
         );
         frame.render_widget(
@@ -77,52 +83,92 @@ fn status_line(state: &ReaderState, palette: Palette) -> Line<'static> {
         .map(|section| section.title.as_str())
         .unwrap_or("Untitled");
 
-    if state.viewport.width < 62 {
-        let mut spans = vec![
-            Span::styled(truncate_width(&state.document.title, 22), palette.accent()),
+    let width = state.viewport.width;
+    if width < 52 {
+        return Line::from(vec![
+            Span::styled(truncate_width(&state.document.title, 18), palette.accent()),
             Span::styled(
-                format!(
-                    "  {section_label} {}/{}",
-                    section_index + 1,
-                    section_count.max(1)
-                ),
-                palette.body(),
+                format!("  {}/{}", section_index + 1, section_count.max(1)),
+                palette.muted(),
             ),
-        ];
-        if state.config.show_progress {
-            spans.push(Span::styled(
-                format!("  {}", format_tenths(state.progress_tenths())),
-                palette.accent(),
-            ));
-        }
-        return Line::from(spans);
+        ]);
     }
 
-    let mut spans = vec![
-        Span::styled(truncate_width(&state.document.title, 30), palette.accent()),
-        Span::styled("  ·  ", palette.muted()),
+    let spans = vec![
+        Span::styled(
+            format!("《{}》", truncate_width(&state.document.title, 26)),
+            palette.accent(),
+        ),
+        Span::styled("   ·   ", palette.muted()),
         Span::styled(
             format!(
                 "{section_label} {}/{}: {}",
                 section_index + 1,
                 section_count.max(1),
-                truncate_width(section_title, 36)
+                truncate_width(section_title, 34)
             ),
             palette.body(),
         ),
     ];
-    if state.config.show_progress {
-        spans.extend([
-            Span::styled("  ·  ", palette.muted()),
-            Span::styled(format_tenths(state.progress_tenths()), palette.accent()),
+    Line::from(spans)
+}
+
+fn reading_footer_line(state: &ReaderState, palette: Palette) -> Line<'static> {
+    let width = usize::from(state.viewport.width);
+    let tenths = state.progress_tenths();
+    let percent_str = format_tenths(tenths);
+    let section_idx = state.current_section();
+    let section_count = state.document.sections.len();
+    let section_info = format!("{}/{}", section_idx + 1, section_count.max(1));
+
+    if width < 54 {
+        return Line::from(vec![
+            Span::styled(format!(" {percent_str} "), palette.accent()),
+            Span::styled("· ", palette.muted()),
+            Span::styled(format!("Sec {section_info}"), palette.body()),
+            Span::styled("  [?]", palette.muted()),
         ]);
     }
-    Line::from(spans)
+
+    let left_spans = vec![Span::styled(format!(" {percent_str} "), palette.accent())];
+    let right_spans = vec![
+        Span::styled(format!("Section {section_info}   "), palette.body()),
+        Span::styled("[? help] ", palette.muted()),
+    ];
+
+    let left_width = percent_str.width() + 2;
+    let right_width = section_info.width() + 19;
+    let available_bar = width.saturating_sub(left_width + right_width + 4);
+
+    if available_bar >= 8 {
+        let ratio = (tenths as f32 / 1000.0).clamp(0.0, 1.0);
+        let filled_chars = (ratio * available_bar as f32).round() as usize;
+        let filled_chars = filled_chars.min(available_bar);
+        let empty_chars = available_bar.saturating_sub(filled_chars);
+
+        let mut spans = left_spans;
+        spans.push(Span::styled("  ", palette.muted()));
+        if filled_chars > 0 {
+            let solid = filled_chars.saturating_sub(1);
+            if solid > 0 {
+                spans.push(Span::styled("━".repeat(solid), palette.accent()));
+            }
+            spans.push(Span::styled("╸", palette.accent()));
+        }
+        if empty_chars > 0 {
+            spans.push(Span::styled("━".repeat(empty_chars), palette.muted()));
+        }
+        spans.push(Span::styled("   ", palette.muted()));
+        spans.extend(right_spans);
+        Line::from(spans)
+    } else {
+        split_row_line(left_spans, right_spans, state.viewport.width)
+    }
 }
 
 fn context_action_line(state: &ReaderState, palette: Palette) -> Line<'static> {
     match &state.overlay {
-        Overlay::None => action_line(READING_BINDINGS, state.viewport.width, palette),
+        Overlay::None => reading_footer_line(state, palette),
         Overlay::Percent(_) => prompt_actions(
             &[("Enter", "Jump"), ("Backspace", "Edit"), ("Esc", "Cancel")],
             palette,
@@ -192,7 +238,7 @@ fn reading_text_area(area: Rect, text_width: Option<u16>) -> Rect {
     let available = area.width.saturating_sub(2).max(1);
     let width = text_width
         .map(|width| width.max(20).min(available))
-        .unwrap_or(available);
+        .unwrap_or_else(|| available.min(crate::pagination::DEFAULT_COMFORT_WIDTH as u16));
     Rect::new(
         area.x + (area.width.saturating_sub(width)) / 2,
         area.y,
@@ -1530,9 +1576,7 @@ mod tests {
 
     #[test]
     fn narrow_hud_keeps_core_keys() {
-        let mut state = state();
-        state.resize(20, 12);
-        let line = context_action_line(&state, Palette::terminal());
+        let line = crate::ui::action_line(READING_BINDINGS, 20, Palette::terminal());
         let text = line
             .spans
             .iter()
@@ -1541,7 +1585,7 @@ mod tests {
         for key in ["k", "j", "g", "t", "?", "q"] {
             assert!(text.contains(key));
         }
-        assert!(text.width() <= usize::from(state.viewport.width));
+        assert!(text.width() <= 20);
     }
 
     #[test]
@@ -1890,18 +1934,18 @@ mod tests {
         let backend = TestBackend::new(80, 24);
         let mut terminal = Terminal::new(backend).unwrap();
 
-        // Normal mode renders title and HUD
+        // Normal mode renders title and footer progress bar
         terminal.draw(|frame| draw(frame, &state)).unwrap();
         let normal_screen = format!("{}", terminal.backend());
         assert!(normal_screen.contains("Book"));
-        assert!(normal_screen.contains("Next"));
+        assert!(normal_screen.contains("Section") || normal_screen.contains("Sec"));
 
-        // Immersive mode hides title and HUD
+        // Immersive mode hides title and footer
         state.config.immersive_mode = true;
         terminal.draw(|frame| draw(frame, &state)).unwrap();
         let immersive_screen = format!("{}", terminal.backend());
-        assert!(!immersive_screen.contains("Book  ·"));
-        assert!(!immersive_screen.contains("[j] Next"));
+        assert!(!immersive_screen.contains("《Book》"));
+        assert!(!immersive_screen.contains("Section"));
     }
 
     #[test]

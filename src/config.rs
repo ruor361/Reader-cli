@@ -22,6 +22,7 @@ pub struct ReaderConfig {
     pub bookshelf_dir: Option<PathBuf>,
     /// Optional Calibre-Web / Calibre-Web Automated OPDS connection.
     pub network_library: NetworkLibraryConfig,
+    pub reading_theme: crate::ui::ReadingTheme,
     #[serde(skip)]
     path: Option<PathBuf>,
 }
@@ -40,6 +41,7 @@ impl Default for ReaderConfig {
             library_dirs: Vec::new(),
             bookshelf_dir: None,
             network_library: NetworkLibraryConfig::default(),
+            reading_theme: crate::ui::ReadingTheme::Terminal,
             path: None,
         }
     }
@@ -121,6 +123,15 @@ impl ReaderConfig {
     pub fn toggle_natural_breaks(&mut self) {
         self.natural_breaks = !self.natural_breaks;
     }
+
+    pub fn cycle_reading_theme(&mut self) -> crate::ui::ReadingTheme {
+        self.reading_theme = self.reading_theme.next();
+        self.reading_theme
+    }
+
+    pub fn set_reading_theme(&mut self, theme: crate::ui::ReadingTheme) {
+        self.reading_theme = theme;
+    }
 }
 
 #[derive(serde::Deserialize)]
@@ -138,6 +149,7 @@ struct ReaderConfigWire {
     library_dirs: Vec<PathBuf>,
     bookshelf_dir: Option<PathBuf>,
     network_library: NetworkLibraryConfig,
+    reading_theme: Option<crate::ui::ReadingTheme>,
 }
 
 impl Default for ReaderConfigWire {
@@ -156,6 +168,7 @@ impl Default for ReaderConfigWire {
             library_dirs: config.library_dirs,
             bookshelf_dir: config.bookshelf_dir,
             network_library: config.network_library,
+            reading_theme: Some(config.reading_theme),
         }
     }
 }
@@ -178,6 +191,7 @@ impl<'de> serde::Deserialize<'de> for ReaderConfig {
             library_dirs: wire.library_dirs,
             bookshelf_dir: wire.bookshelf_dir,
             network_library: wire.network_library,
+            reading_theme: wire.reading_theme.unwrap_or_default(),
             path: None,
         })
     }
